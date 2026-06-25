@@ -115,15 +115,27 @@ CLIP (transformers) · PyTorch · ChromaDB
 
 ---
 
-## 🧭 Roadmap (v2)
+## 🆕 What's new in v2
 
-Planned improvements for the next release:
+- **Confidence-based match labels** — the "exact vs approximate" distinction now
+  works (gated on the raw cross-encoder score), instead of always flagging
+  results as approximate.
+- **True text + visual fusion** — a moment supported by both speech and on-screen
+  content is boosted and ranks higher, rather than the two being scored separately.
+- **Single-pass frame extraction** — all frames are pulled in one ffmpeg call
+  instead of one process per frame (typically 10–50× faster).
+- **Smarter re-use** — videos are identified by content hash, so an already-indexed
+  video loads instantly and renaming a file no longer forces a reprocess.
+- **Self-cleaning** — extracted audio and frames are removed after indexing; the
+  source video is kept for playback.
+- **Hardening** — transcript text is HTML-escaped in the UI, the Whisper model is
+  cached (with GPU auto-detect), silent failures now log, and dependencies are pinned.
 
-- True text + visual score fusion per timestamp
-- Single-pass frame extraction (major speed-up)
-- Confidence-based "exact vs approximate" match labels
-- Collection/temp cleanup on new video + cross-library search
-- HTML-escaping and broader error logging
+## 🧭 Roadmap (future)
+
+- Cross-library search (query across all indexed videos at once)
+- Whisper model-size selector (accuracy vs speed)
+- Persist processed videos across sessions
 
 ---
 

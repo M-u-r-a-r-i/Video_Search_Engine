@@ -4,11 +4,18 @@ Streamlit frontend for the VideoRAG application — Dark premium, no sidebar.
 """
 
 import os
+import html
 import hashlib
 import streamlit as st
 
-from backend.processor import extract_audio, transcribe_audio, extract_frames, TEMP_DIR
-from backend.vector_store import add_video, add_video_frames, search
+from backend.processor import (
+    extract_audio,
+    transcribe_audio,
+    extract_frames,
+    cleanup_artifacts,
+    TEMP_DIR,
+)
+from backend.vector_store import add_video, add_video_frames, search, has_video
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -402,7 +409,7 @@ def _card_html(idx: int, ts_label: str, excerpt: str, score: float) -> str:
     return (
         f'<div class="result-card" style="animation-delay:{idx*0.06}s">'
         f'<div class="timestamp">⏱ {ts_label}</div>'
-        f'<div class="excerpt">{excerpt}</div>'
+        f'<div class="excerpt">{html.escape(excerpt)}</div>'
         f'<span class="score-badge">relevance: {score:.2f}</span>'
         f'</div>'
     )
@@ -436,16 +443,20 @@ if not st.session_state.video_path or not st.session_state.processed:
         save_path = os.path.join(TEMP_DIR, uploaded.name)
 
         if st.session_state.video_path != save_path:
+            data = uploaded.getbuffer()
             with open(save_path, "wb") as f:
-                f.write(uploaded.getbuffer())
+                f.write(data)
             st.session_state.video_path = save_path
-            st.session_state.video_id = hashlib.md5(
-                uploaded.name.encode()
-            ).hexdigest()[:12]
-            st.session_state.processed = False
+            # Content-based id: identical videos share an index regardless of
+            # filename, and a rename never forces a needless reprocess.
+            st.session_state.video_id = hashlib.md5(data).hexdigest()[:12]
             st.session_state.results = []
             st.session_state.seek_time = 0
             st.session_state.last_query = ""
+            # Skip processing entirely if this video is already indexed.
+            st.session_state.processed = has_video(st.session_state.video_id)
+            if st.session_state.processed:
+                st.rerun()
 
         if not st.session_state.processed:
             st.markdown("<br>", unsafe_allow_html=True)
@@ -469,6 +480,8 @@ if not st.session_state.video_path or not st.session_state.processed:
                             n_frames = add_video_frames(
                                 st.session_state.video_id, frames
                             )
+                        st.write("🧹 Cleaning up temporary files…")
+                        cleanup_artifacts(save_path, st.session_state.video_id)
                         status.update(
                             label=f"✅ Done — {n_chunks} text chunks + {n_frames} frames indexed",
                             state="complete",
@@ -526,7 +539,7 @@ else:
             '<div class="no-results">'
             '<div class="nr-icon">🔎</div>'
             '<p class="nr-msg">No matching content found for '
-            f'<strong>"{st.session_state.last_query}"</strong>. '
+            f'<strong>"{html.escape(st.session_state.last_query)}"</strong>. '
             'Try a different query.</p>'
             '</div>',
             unsafe_allow_html=True,
@@ -550,7 +563,7 @@ else:
         # Results header
         st.markdown(
             '<p class="results-panel-title">Search Results</p>'
-            f'<p class="results-panel-query">"{st.session_state.last_query}"</p>',
+            f'<p class="results-panel-query">"{html.escape(st.session_state.last_query)}"</p>',
             unsafe_allow_html=True,
         )
 
