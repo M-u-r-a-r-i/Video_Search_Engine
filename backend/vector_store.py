@@ -6,6 +6,9 @@ semantic search with cross-encoder reranking and result merging.
 
 import os
 import sys
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Python 3.14 compat: chromadb imports pydantic.v1 which cannot infer types
@@ -197,6 +200,28 @@ def _safe_collection_name(video_id: str) -> str:
         safe = safe.ljust(3, "_")
     return safe
 
+
+def has_video(video_id: str) -> bool:
+    """Return True if this video already has a populated text collection."""
+    client = _get_chroma_client()
+    safe_name = _safe_collection_name(video_id)
+    try:
+        return client.get_collection(name=safe_name).count() > 0
+    except Exception:
+        return False
+
+
+def delete_video(video_id: str) -> None:
+    """Delete both the text and visual collections for a video (if present)."""
+    client = _get_chroma_client()
+    safe_name = _safe_collection_name(video_id)
+    for name in (safe_name, safe_name + "_visual"):
+        try:
+            client.delete_collection(name=name)
+        except Exception:
+            logger.debug("No collection '%s' to delete", name, exc_info=True)
+
+
 def add_video(video_id: str, segments: list[dict]) -> int:
     """Chunk, embed, and store segments for a video in ChromaDB.
 
@@ -333,10 +358,11 @@ def search(video_id: str, query: str, top_k: int = 5) -> dict:
                         "end_time": metas[i]["end_time"],
                         "text": doc,
                         "score": score,
+                        "raw_score": score,   # un-normalised cross-encoder score
                         "source": "text",
                     })
     except Exception:
-        pass
+        logger.warning("Text search failed for '%s'", safe_name, exc_info=True)
 
     # ----- Visual search with CLIP -----
     visual_candidates: list[dict] = []
@@ -375,50 +401,84 @@ def search(video_id: str, query: str, top_k: int = 5) -> dict:
                         "source": "visual",
                     })
     except Exception:
-        pass  # visual collection may not exist yet
+        logger.debug("Visual search skipped/failed for '%s'", visual_name, exc_info=True)
 
-    # ----- Fuse scores -----
-    # Normalise scores within each source to [0, 1] range
-    def _normalise(items: list[dict]) -> None:
-        if not items:
-            return
-        scores = [c["score"] for c in items]
-        lo, hi = min(scores), max(scores)
-        span = hi - lo if hi != lo else 1.0
-        for c in items:
-            c["score"] = (c["score"] - lo) / span
+    # ----- Confidence gate (uses the *raw* cross-encoder score) -----
+    # The cross-encoder emits an unbounded logit; INTENT_CONFIDENCE is calibrated
+    # against that raw value, so it must be checked before any normalisation.
+    confident = any(c["raw_score"] >= INTENT_CONFIDENCE for c in text_candidates)
 
-    _normalise(text_candidates)
-    _normalise(visual_candidates)
-
-    # Apply source weights
-    for c in text_candidates:
-        c["score"] = round(c["score"] * TEXT_WEIGHT, 4)
-    for c in visual_candidates:
-        c["score"] = round(c["score"] * VISUAL_WEIGHT, 4)
-
-    # Combine and sort
-    all_candidates = text_candidates + visual_candidates
-    all_candidates.sort(key=lambda c: c["score"], reverse=True)
-
-    # Determine if we have confident intent-level matches
-    confident = [c for c in all_candidates if c.get("source") == "text" and c["score"] >= INTENT_CONFIDENCE]
-
-    if confident:
-        # Intent-matched: use only high-confidence results
-        top_results = confident[:top_k]
-        match_type = "exact"
-    elif all_candidates:
-        # Fallback: return best keyword-level matches
-        top_results = all_candidates[:top_k]
-        match_type = "keyword"
-    else:
+    # ----- Fuse text + visual scores per time span -----
+    fused = _fuse_scores(text_candidates, visual_candidates)
+    if not fused:
         return {"match_type": "none", "results": []}
 
-    # Clean up internal 'source' key before returning
+    fused.sort(key=lambda c: c["score"], reverse=True)
+    top_results = fused[:top_k]
+    match_type = "exact" if confident else "keyword"
+
+    # Clean up internal keys before returning
     for c in top_results:
         c.pop("source", None)
+        c.pop("raw_score", None)
 
     # Merge adjacent / overlapping chunks into consolidated time spans
     merged = _merge_adjacent_results(top_results)
     return {"match_type": match_type, "results": merged}
+
+
+def _normalise(items: list[dict]) -> None:
+    """Scale each item's ``score`` into the [0, 1] range, in place.
+
+    When every score is equal (e.g. a single result), they are all equally
+    relevant, so they are set to 1.0 rather than collapsing to 0.0.
+    """
+    if not items:
+        return
+    scores = [c["score"] for c in items]
+    lo, hi = min(scores), max(scores)
+    if hi == lo:
+        for c in items:
+            c["score"] = 1.0
+        return
+    span = hi - lo
+    for c in items:
+        c["score"] = (c["score"] - lo) / span
+
+
+def _fuse_scores(
+    text_candidates: list[dict],
+    visual_candidates: list[dict],
+) -> list[dict]:
+    """Combine text and visual candidates into a single weighted ranking.
+
+    Scores are normalised within each modality, then a text span's score is
+    *boosted* by the best visual match that overlaps it in time — so a moment
+    supported by both what is said and what is shown ranks highest. Visual
+    matches with no overlapping text survive on their own (visual-only) weight.
+    """
+    _normalise(text_candidates)
+    _normalise(visual_candidates)
+
+    def _overlaps(a: dict, b: dict) -> bool:
+        return a["start_time"] < b["end_time"] and b["start_time"] < a["end_time"]
+
+    fused: list[dict] = []
+    used_visual: set[int] = set()
+
+    for t in text_candidates:
+        best_v = 0.0
+        for vi, v in enumerate(visual_candidates):
+            if _overlaps(t, v):
+                used_visual.add(vi)
+                best_v = max(best_v, v["score"])
+        t["score"] = round(t["score"] * TEXT_WEIGHT + best_v * VISUAL_WEIGHT, 4)
+        fused.append(t)
+
+    # Visual-only spans (no overlapping text) contribute at their visual weight.
+    for vi, v in enumerate(visual_candidates):
+        if vi not in used_visual:
+            v["score"] = round(v["score"] * VISUAL_WEIGHT, 4)
+            fused.append(v)
+
+    return fused
