@@ -5,8 +5,6 @@ then jump straight to the matching timestamp. VideoRAG transcribes the audio,
 indexes both the speech and the visual frames, and runs multimodal semantic
 search over them — all locally on your machine.
 
-> **Version 1.0** — first public release. See [Roadmap](#-roadmap-v2) for what's next.
-
 ---
 
 ## ✨ Features
