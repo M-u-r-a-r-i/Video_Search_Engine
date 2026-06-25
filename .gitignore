@@ -1,0 +1,35 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Project-generated data (regenerated at runtime) ----
+chroma_db/
+temp_data/
+*.wav
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+
+# ---- Model / HF caches ----
+.cache/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- Local-only docs (not part of the public repo) ----
+documentation.md
+project_explanation.txt
