@@ -137,8 +137,3 @@ CLIP (transformers) · PyTorch · ChromaDB
 - Whisper model-size selector (accuracy vs speed)
 - Persist processed videos across sessions
 
----
-
-## 📄 License
-
-Add a license of your choice (e.g. MIT) before sharing publicly.
