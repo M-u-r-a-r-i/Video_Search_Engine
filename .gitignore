@@ -33,3 +33,4 @@ Thumbs.db
 # ---- Local-only docs (not part of the public repo) ----
 documentation.md
 project_explanation.txt
+PROJECT_DEEP_DIVE.md
