@@ -1,20 +1,20 @@
 /* VideoRAG website: no build step, no external requests (works offline). */
 
 :root {
-  --bg: #0b0b12;
-  --bg-elev: #14141f;
-  --bg-elev-2: #1b1b29;
-  --border: #26263a;
-  --text: #ececf3;
-  --text-muted: #a0a0b4;
-  --text-faint: #6b6b80;
-  --accent: #7c5cff;
-  --accent-hover: #9479ff;
-  --accent-soft: rgba(124, 92, 255, 0.14);
-  --mark: rgba(124, 92, 255, 0.28);
-  --ok: #3ecf8e;
-  --warn: #f5b942;
-  --danger: #f2555a;
+  --bg: #0f1115;
+  --bg-elev: #171a21;
+  --bg-elev-2: #1f232b;
+  --border: #2c313a;
+  --text: #e6e8eb;
+  --text-muted: #a3a9b3;
+  --text-faint: #6f7682;
+  --accent: #3d8bfd;
+  --accent-hover: #5c9dff;
+  --accent-soft: rgba(61, 139, 253, 0.14);
+  --mark: rgba(250, 204, 21, 0.28);
+  --ok: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
   --radius: 14px;
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -24,18 +24,21 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f6f6fb;
+    --bg: #f7f8fa;
     --bg-elev: #ffffff;
-    --bg-elev-2: #f0f0f7;
-    --border: #e1e1ec;
-    --text: #17172a;
-    --text-muted: #55556b;
-    --text-faint: #8a8aa0;
-    --accent: #6a46ff;
-    --accent-hover: #5a35f0;
-    --accent-soft: rgba(106, 70, 255, 0.10);
-    --mark: rgba(106, 70, 255, 0.18);
-    --shadow: 0 10px 30px rgba(20, 20, 60, 0.08);
+    --bg-elev-2: #f1f3f6;
+    --border: #dde1e6;
+    --text: #1c2128;
+    --text-muted: #4d5562;
+    --text-faint: #7d8590;
+    --accent: #1f6feb;
+    --accent-hover: #1858c4;
+    --accent-soft: rgba(31, 111, 235, 0.10);
+    --mark: rgba(250, 204, 21, 0.38);
+    --ok: #1a7f37;
+    --warn: #9a6700;
+    --danger: #cf222e;
+    --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
     color-scheme: light;
   }
 }
@@ -76,7 +79,6 @@ button { font: inherit; color: inherit; }
   border-left: 10px solid #fff; border-top: 6px solid transparent; border-bottom: 6px solid transparent;
 }
 .topbar-tag { color: var(--text-faint); font-size: 0.9rem; }
-.footer { text-align: center; color: var(--text-faint); font-size: 0.85rem; padding: 20px; border-top: 1px solid var(--border); }
 
 /* ------------------------------------------------------------ home */
 .hero { text-align: center; margin: 24px auto 28px; max-width: 720px; }
