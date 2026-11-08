@@ -1,0 +1,142 @@
+{
+  "video": "All Sugars Explained (YouTube id y01_sYgHYUg, ~18.5 min)",
+  "url": "https://www.youtube.com/watch?v=y01_sYgHYUg",
+  "note": "Each 'answer' is a phrase spoken in the video (or a list of acceptable phrases). The benchmark finds the sentence containing it and checks where search jumps to. Exact-term queries use the correct spelling a student would type, which may differ from what Whisper hears.",
+  "queries": [
+    {
+      "q": "who first turned cane juice into crystals",
+      "answer": "boil the juice into solid crystals"
+    },
+    {
+      "q": "why was sugar so expensive in medieval times",
+      "answer": "considered a luxury spice"
+    },
+    {
+      "q": "role of slavery in making sugar cheap",
+      "answer": "transatlantic slave trade"
+    },
+    {
+      "q": "who invented sugar cubes",
+      "answer": "inventing sugar cubes"
+    },
+    {
+      "q": "why do cookies come out chewier with brown sugar",
+      "answer": "makes cookies chewier"
+    },
+    {
+      "q": "what is turbinado named after",
+      "answer": "named after the turbine"
+    },
+    {
+      "q": "honey found in an egyptian pharaoh's tomb",
+      "answer": "tomb of tutankhamun"
+    },
+    {
+      "q": "how do bees make honey",
+      "answer": "into honey using enzymes"
+    },
+    {
+      "q": "how much sap is needed for one litre of maple syrup",
+      "answer": "liters of sap"
+    },
+    {
+      "q": "maple syrup grading colors",
+      "answer": "color categories"
+    },
+    {
+      "q": "which country makes most of the maple syrup",
+      "answer": "canada produces roughly"
+    },
+    {
+      "q": "how is coconut sugar harvested",
+      "answer": "farmers climb the palms"
+    },
+    {
+      "q": "why candy makers use corn syrup",
+      "answer": "inhibits crystallization"
+    },
+    {
+      "q": "is HFCS worse than normal sugar",
+      "answer": "well supported by science"
+    },
+    {
+      "q": "difference between light dark and blackstrap molasses",
+      "answer": "second extraction yields dark molasses"
+    },
+    {
+      "q": "molasses taxes and the American revolution",
+      "answer": "molasses act of 1733"
+    },
+    {
+      "q": "Boston molasses flood disaster",
+      "answer": "molasses flood"
+    },
+    {
+      "q": "dates as food for desert travellers",
+      "answer": "bread of the desert"
+    },
+    {
+      "q": "why bagels use barley malt",
+      "answer": "used in bagel production"
+    },
+    {
+      "q": "what is gur used for in India",
+      "answer": [
+        "central role not just in cooking",
+        "jaggery is used in"
+      ]
+    },
+    {
+      "q": "Jacob Kristoff Rad",
+      "answer": "told her husband",
+      "kind": "exact"
+    },
+    {
+      "q": "pulque",
+      "answer": "pulque",
+      "kind": "exact"
+    },
+    {
+      "q": "Carose syrup 1902",
+      "answer": "since 1902",
+      "kind": "exact"
+    },
+    {
+      "q": "Sugar Act 1764",
+      "answer": "sugar act of 1764",
+      "kind": "exact"
+    },
+    {
+      "q": "Apis mellifera",
+      "answer": "western honey bee",
+      "kind": "exact"
+    },
+    {
+      "q": "2.3 million gallons",
+      "answer": "million gallons",
+      "kind": "exact"
+    },
+    {
+      "q": "Gupta dynasty",
+      "answer": "gupta dynasty",
+      "kind": "exact"
+    },
+    {
+      "q": "aguamiel",
+      "answer": "honey water",
+      "kind": "exact"
+    },
+    {
+      "q": "explain photosynthesis",
+      "answer": null
+    },
+    {
+      "q": "what is the exam date",
+      "answer": null
+    },
+    {
+      "q": "how does a neural network learn",
+      "answer": null
+    }
+  ]
+}

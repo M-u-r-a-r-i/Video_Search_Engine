@@ -1,25 +1,37 @@
 """
 processor.py
-Audio extraction (ffmpeg) and speech-to-text transcription (faster-whisper).
+Audio extraction (ffmpeg) and speech-to-text with word-level timestamps
+(faster-whisper), turned into timestamped sentences.
 """
 
 import os
-import glob
 import shutil
+import subprocess
 import sys
 import logging
-import ffmpeg
+from collections.abc import Callable
+
 from faster_whisper import WhisperModel
+
+from backend.paths import TEMP_DIR
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "temp_data")
 WHISPER_MODEL_SIZE = "base"
 
-os.makedirs(TEMP_DIR, exist_ok=True)
+# A "sentence" longer than this is split at a word boundary. Whisper sometimes
+# emits long runs without punctuation; without a cap one result could span
+# minutes and the jump-to time would be useless.
+MAX_SENTENCE_SECONDS = 15.0
+MAX_SENTENCE_WORDS = 40
+SENTENCE_END = (".", "?", "!")
+
+
+class ProcessingError(Exception):
+    """A user-facing problem with the input video or the environment."""
 
 
 # ---------------------------------------------------------------------------
@@ -61,18 +73,17 @@ def _get_whisper_model() -> WhisperModel:
 
 
 # ---------------------------------------------------------------------------
-# Resolve ffmpeg binary (Windows PATH may not be refreshed in this process)
+# Resolve ffmpeg / ffprobe (Windows PATH may not be refreshed in this process)
 # ---------------------------------------------------------------------------
-def _find_ffmpeg() -> str:
-    """Return the absolute path to the ffmpeg executable."""
-    found = shutil.which("ffmpeg")
+def _find_tool(name: str) -> str | None:
+    """Return the absolute path to an ffmpeg-suite executable, or None."""
+    found = shutil.which(name)
     if found:
         return found
 
     # On Windows the current process may have inherited a stale PATH.
     # Read the *live* User + Machine PATH from the registry and search there.
     if sys.platform == "win32":
-        machine = os.environ.get("Path", "")
         try:
             import winreg
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
@@ -80,149 +91,156 @@ def _find_ffmpeg() -> str:
                 machine = winreg.QueryValueEx(key, "Path")[0]
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
                 user = winreg.QueryValueEx(key, "Path")[0]
-            live_path = f"{machine};{user}"
-            found = shutil.which("ffmpeg", path=live_path)
-            if found:
-                return found
+            return shutil.which(name, path=f"{machine};{user}")
         except OSError:
-            logger.debug("Registry PATH lookup for ffmpeg failed", exc_info=True)
+            logger.debug("Registry PATH lookup for %s failed", name, exc_info=True)
+    return None
 
-    return "ffmpeg"  # last resort — let subprocess raise if missing
+
+FFMPEG_CMD = _find_tool("ffmpeg")
+FFPROBE_CMD = _find_tool("ffprobe")
 
 
-FFMPEG_CMD = _find_ffmpeg()
-
-FRAME_INTERVAL = 5  # extract one frame every N seconds
+def check_ffmpeg() -> None:
+    """Raise :class:`ProcessingError` if ffmpeg/ffprobe are not installed."""
+    if not FFMPEG_CMD or not FFPROBE_CMD:
+        raise ProcessingError(
+            "FFmpeg was not found. Install it (see the README) and restart the app."
+        )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def extract_audio(video_path: str) -> str:
-    """Extract mono 16 kHz WAV from a video file.
+def probe_video(video_path: str) -> dict:
+    """Return ``{duration: float, has_audio: bool}`` for a video file."""
+    check_ffmpeg()
+    try:
+        out = subprocess.run(
+            [FFPROBE_CMD, "-v", "error",
+             "-show_entries", "format=duration:stream=codec_type",
+             "-of", "default=noprint_wrappers=1", video_path],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except subprocess.CalledProcessError as exc:
+        raise ProcessingError(
+            "This file could not be read as a video. It may be corrupt or "
+            "in an unsupported format."
+        ) from exc
 
-    Args:
-        video_path: Absolute path to the input video.
+    duration = 0.0
+    for line in out.splitlines():
+        if line.startswith("duration="):
+            try:
+                duration = float(line.split("=", 1)[1])
+            except ValueError:
+                pass
+    return {"duration": duration, "has_audio": "codec_type=audio" in out}
+
+
+def extract_audio(video_path: str, video_id: str) -> str:
+    """Extract mono 16 kHz WAV from a video file.
 
     Returns:
         Path to the extracted .wav file inside ``temp_data/``.
+
+    Raises:
+        ProcessingError: if ffmpeg is missing, the video has no audio track,
+            or extraction fails.
     """
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-    audio_path = os.path.join(TEMP_DIR, f"{base_name}.wav")
+    info = probe_video(video_path)
+    if not info["has_audio"]:
+        raise ProcessingError(
+            "This video has no audio track, so there is no speech to search."
+        )
 
-    # Overwrite if a previous extraction exists
-    if os.path.exists(audio_path):
-        os.remove(audio_path)
-
-    (
-        ffmpeg
-        .input(video_path)
-        .output(audio_path, ac=1, ar=16000, format="wav")
-        .overwrite_output()
-        .run(cmd=FFMPEG_CMD, quiet=True)
-    )
-
+    os.makedirs(TEMP_DIR, exist_ok=True)
+    audio_path = os.path.join(TEMP_DIR, f"{video_id}.wav")
+    try:
+        subprocess.run(
+            [FFMPEG_CMD, "-y", "-v", "error", "-i", video_path,
+             "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", audio_path],
+            capture_output=True, text=True, check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.warning("ffmpeg audio extraction failed: %s", exc.stderr)
+        raise ProcessingError("Could not extract audio from this video.") from exc
     return audio_path
 
 
-def transcribe_audio(audio_path: str) -> list[dict]:
-    """Transcribe an audio file using faster-whisper.
+def transcribe_audio(
+    audio_path: str,
+    duration: float = 0.0,
+    on_progress: Callable[[float], None] | None = None,
+) -> list[dict]:
+    """Transcribe audio into timestamped sentences.
 
     Args:
-        audio_path: Path to a WAV file (mono, 16 kHz recommended).
+        audio_path:  Path to a mono 16 kHz WAV.
+        duration:    Audio length in seconds (only used for progress).
+        on_progress: Optional callback receiving progress in ``[0, 1]``.
 
     Returns:
-        List of segment dicts, each with keys ``start`` (float, seconds),
-        ``end`` (float, seconds), and ``text`` (str).
+        List of ``{start, end, text}`` sentence dicts, in time order. Times
+        come from Whisper's word timestamps, so ``start`` is the moment the
+        first word of the sentence is spoken.
     """
     model = _get_whisper_model()
-    segments_gen, _info = model.transcribe(audio_path, vad_filter=True)
+    segments, _info = model.transcribe(
+        audio_path, vad_filter=True, word_timestamps=True
+    )
 
-    segments: list[dict] = []
-    for seg in segments_gen:
-        segments.append(
-            {
-                "start": seg.start,
-                "end": seg.end,
-                "text": seg.text.strip(),
-            }
-        )
+    words: list[dict] = []
+    for seg in segments:
+        for w in seg.words or []:
+            text = w.word.strip()
+            if text:
+                words.append({"start": w.start, "end": w.end, "text": text})
+        if on_progress and duration > 0:
+            on_progress(min(seg.end / duration, 1.0))
 
-    return segments
+    return words_to_sentences(words)
 
 
-def extract_frames(
-    video_path: str,
-    video_id: str,
-    interval: float = FRAME_INTERVAL,
+def words_to_sentences(
+    words: list[dict],
+    max_seconds: float = MAX_SENTENCE_SECONDS,
+    max_words: int = MAX_SENTENCE_WORDS,
 ) -> list[dict]:
-    """Extract frames from a video at regular intervals in a single ffmpeg pass.
+    """Group timestamped words into sentences.
 
-    Args:
-        video_path: Absolute path to the input video.
-        video_id:   Unique identifier for the video (used in output path).
-        interval:   Seconds between extracted frames (default 5).
-
-    Returns:
-        List of ``{timestamp: float, frame_path: str}`` dicts.
+    A sentence ends at ``.``, ``?`` or ``!``, or is force-split once it
+    exceeds *max_seconds* or *max_words* (unpunctuated speech).
     """
-    frames_dir = os.path.join(TEMP_DIR, "frames", video_id)
-    os.makedirs(frames_dir, exist_ok=True)
+    sentences: list[dict] = []
+    current: list[dict] = []
 
-    # Clear any stale frames from a previous run so indices stay aligned.
-    for stale in glob.glob(os.path.join(frames_dir, "frame_*.jpg")):
-        try:
-            os.remove(stale)
-        except OSError:
-            logger.debug("Could not remove stale frame %s", stale, exc_info=True)
+    def flush() -> None:
+        if current:
+            sentences.append({
+                "start": round(current[0]["start"], 2),
+                "end": round(current[-1]["end"], 2),
+                "text": " ".join(w["text"] for w in current),
+            })
+            current.clear()
 
-    out_pattern = os.path.join(frames_dir, "frame_%05d.jpg")
+    for w in words:
+        current.append(w)
+        too_long = (w["end"] - current[0]["start"] >= max_seconds
+                    or len(current) >= max_words)
+        if w["text"].endswith(SENTENCE_END) or too_long:
+            flush()
+    flush()
+    return sentences
 
-    # One ffmpeg invocation extracts every frame via the fps filter — far
-    # faster than spawning a separate process per timestamp.
+
+def cleanup_audio(video_id: str) -> None:
+    """Remove the extracted WAV once the video is indexed."""
+    audio_path = os.path.join(TEMP_DIR, f"{video_id}.wav")
     try:
-        (
-            ffmpeg
-            .input(video_path)
-            .output(out_pattern, vf=f"fps=1/{interval}", **{"q:v": 2})
-            .overwrite_output()
-            .run(cmd=FFMPEG_CMD, quiet=True)
-        )
-    except Exception:
-        logger.warning("Frame extraction failed for %s", video_path, exc_info=True)
-        return []
-
-    # The fps filter emits one frame per `interval` seconds starting at t=0,
-    # so frame N (0-indexed) corresponds to timestamp N * interval.
-    frame_files = sorted(glob.glob(os.path.join(frames_dir, "frame_*.jpg")))
-    frames: list[dict] = []
-    for idx, path in enumerate(frame_files):
-        if os.path.getsize(path) > 0:
-            frames.append({"timestamp": round(idx * interval, 2), "frame_path": path})
-
-    return frames
-
-
-def cleanup_artifacts(video_path: str, video_id: str) -> None:
-    """Remove intermediate files (extracted WAV + frames) after indexing.
-
-    The source video is preserved (it is still needed for playback); only the
-    derived artifacts, which live in ``temp_data/`` and are no longer required
-    once embeddings are stored, are deleted.
-
-    Args:
-        video_path: Path to the source video (used to locate its WAV).
-        video_id:   Video identifier (used to locate its frames directory).
-    """
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-    audio_path = os.path.join(TEMP_DIR, f"{base_name}.wav")
-    if os.path.exists(audio_path):
-        try:
-            os.remove(audio_path)
-        except OSError:
-            logger.debug("Could not remove %s", audio_path, exc_info=True)
-
-    frames_dir = os.path.join(TEMP_DIR, "frames", video_id)
-    if os.path.isdir(frames_dir):
-        shutil.rmtree(frames_dir, ignore_errors=True)
+        os.remove(audio_path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.debug("Could not remove %s", audio_path, exc_info=True)
