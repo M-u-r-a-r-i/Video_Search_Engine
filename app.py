@@ -434,9 +434,13 @@ def _card_html(idx: int, r: dict) -> str:
         )
     badge = ('<span class="score-badge">strong match</span>' if r["strong"]
              else '<span class="score-badge weak">weak match</span>')
+    if r.get("kind") == "explained":
+        label = f'📖 Explained here · {_fmt(r["start"])} – {_fmt(r["end"])}'
+    else:
+        label = f'💬 Mentioned at {_fmt(r["jump_time"])}'
     return (
         f'<div class="result-card" style="animation-delay:{idx*0.06}s">'
-        f'<div class="timestamp">⏱ {_fmt(r["jump_time"])}</div>'
+        f'<div class="timestamp">{label}</div>'
         f'<div class="excerpt">{context}</div>'
         f'{badge}'
         f'</div>'

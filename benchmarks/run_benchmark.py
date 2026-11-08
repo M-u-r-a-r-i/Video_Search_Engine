@@ -10,6 +10,9 @@ then every query is searched and scored:
   right passage  - the top result's passage contains the answer sentence
   in top 5       - any of the 5 results contains the answer sentence
   out-of-scope   - queries with no answer should produce no *strong* match
+
+Topic queries (a bare subject) count "on the second" only when the jump lands
+where the explanation of that subject starts, not at a passing mention.
 """
 
 import hashlib
@@ -69,7 +72,7 @@ def main(video_path: str, queries_path: str) -> None:
         sentences = [dict(r) for r in conn.execute(
             "SELECT start, end, text FROM sentences WHERE video_id = ? ORDER BY idx", (video_id,))]
 
-    tally = {"normal": [0, 0, 0, 0], "exact": [0, 0, 0, 0]}   # second, passage, top5, total
+    tally = {"normal": [0, 0, 0, 0], "exact": [0, 0, 0, 0], "topic": [0, 0, 0, 0]}   # second, passage, top5, total
     oos_ok = oos_total = 0
     latencies = []
     for item in spec["queries"]:
@@ -100,7 +103,7 @@ def main(video_path: str, queries_path: str) -> None:
         top5 = any(contains(r) for r in results)
         row[0] += on_sec; row[1] += passage; row[2] += top5
         label = "EXACT" if on_sec else ("NEAR " if passage else ("TOP5 " if top5 else "MISS "))
-        got = f"{top['jump_time']:7.1f}s {'strong' if top['strong'] else 'weak  '}" if top else "   none        "
+        got = f"{top['jump_time']:7.1f}s {'strong' if top['strong'] else 'weak  '} {top.get('kind', ''):9s}" if top else "   none        "
         print(f"{label} answer at {ans:7.1f}s  jump {got}  {item['q']}")
 
     print()

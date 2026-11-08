@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import backend.store as store
-from backend.store import build_chunks, fts_query, rrf_fuse
+from backend.store import build_chunks, fts_query, group_sections, is_topic_query, rrf_fuse
 
 VOCAB_DIM = 512
 
@@ -101,7 +101,7 @@ def test_index_and_search_pinpoints_the_sentence():
 
 def test_results_are_sorted_and_deduplicated():
     store.index_video("v1", "lec.mp4", "/x", 60.0, LECTURE)
-    results = store.search("v1", "gradient descent", top_k=5)
+    results = store.search("v1", "how does gradient descent work", top_k=5)  # a question: no topic boost
     scores = [r["score"] for r in results]
     assert scores == sorted(scores, reverse=True)
     jumps = [r["jump_time"] for r in results]
@@ -147,3 +147,53 @@ def test_search_is_scoped_to_one_video():
     store.index_video("v1", "a.mp4", "/x", 60.0, LECTURE)
     store.index_video("v2", "b.mp4", "/x", 10.0, _sentences(["Photosynthesis happens in leaves."]))
     assert all("Photosynthesis" not in r["text"] for r in store.search("v1", "photosynthesis leaves"))
+
+
+# ---------------------------------------------------------------- topics vs mentions
+@pytest.mark.parametrize("query, topic", [
+    ("brown sugar", True),
+    ("gradient descent", True),
+    ("explain the fourier transform in detail", True),
+    ("who invented sugar cubes", False),
+    ("why do cookies get chewy", False),
+    ("brown sugar?", False),
+    ("difference between light and dark molasses", False),
+])
+def test_is_topic_query(query, topic):
+    assert is_topic_query(query) is topic
+
+
+def test_group_sections_bridges_one_missing_passage():
+    ch = lambda i: {"id": i, "first_sent": i, "last_sent": i + 1}  # noqa: E731
+    groups = group_sections([ch(5), ch(1), ch(2), ch(4), ch(9)])
+    assert [[c["id"] for c in g] for g in groups] == [[1, 2, 4, 5], [9]]
+
+
+TOPIC_LECTURE = _sentences(
+    ["Welcome back everyone.", "Last week we covered cell structure.",
+     "Plants also contain chloroplasts, which matter for photosynthesis later."]       # passing mention
+    + [f"Filler about the syllabus and grading, part {chr(65 + i)}." for i in range(8)]
+    + ["Today the main topic is photosynthesis."]                                    # section starts here
+    + [f"Photosynthesis step {i} turns light energy into chemical energy." for i in range(10)]
+    + ["That wraps up the topic.", "See you next week."]
+)
+
+
+def test_topic_search_lands_on_start_of_explanation(monkeypatch):
+    monkeypatch.setattr(store, "TOPIC_START_MARGIN", 1.0)  # fake scores are coarse
+    store.index_video("bio", "bio.mp4", "/x", 200.0, TOPIC_LECTURE)
+    results = store.search("bio", "photosynthesis")
+
+    first = results[0]
+    assert first["kind"] == "explained"
+    assert first["sentence"] == "Today the main topic is photosynthesis."
+    assert first["end"] - first["start"] >= store.EXPLAINED_MIN_SECONDS
+
+    mention = [r for r in results if r["kind"] == "mention"]
+    assert mention and "chloroplasts" in mention[0]["sentence"]
+
+
+def test_question_lands_on_answer_sentence_not_section_start():
+    store.index_video("bio", "bio.mp4", "/x", 200.0, TOPIC_LECTURE)
+    top = store.search("bio", "which photosynthesis step 7")[0]
+    assert top["sentence"].startswith("Photosynthesis step 7")

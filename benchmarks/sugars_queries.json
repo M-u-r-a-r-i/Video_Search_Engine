@@ -1,7 +1,7 @@
 {
   "video": "All Sugars Explained (YouTube id y01_sYgHYUg, ~18.5 min)",
   "url": "https://www.youtube.com/watch?v=y01_sYgHYUg",
-  "note": "Each 'answer' is a phrase spoken in the video (or a list of acceptable phrases). The benchmark finds the sentence containing it and checks where search jumps to. Exact-term queries use the correct spelling a student would type, which may differ from what Whisper hears.",
+  "note": "Each 'answer' is a phrase spoken in the video (or a list of acceptable phrases). The benchmark finds the sentence containing it and checks where search jumps to. Exact-term queries use the correct spelling a student would type, which may differ from what Whisper hears. Topic queries (a bare subject like 'honey') expect the jump to land where that subject's explanation starts.",
   "queries": [
     {
       "q": "who first turned cane juice into crystals",
@@ -125,6 +125,61 @@
       "q": "aguamiel",
       "answer": "honey water",
       "kind": "exact"
+    },
+    {
+      "q": "brown sugar",
+      "answer": "brown sugar is essentially",
+      "kind": "topic"
+    },
+    {
+      "q": "honey",
+      "answer": "is the only form of sugar in this video",
+      "kind": "topic"
+    },
+    {
+      "q": "maple syrup",
+      "answer": "one of the very few sweeteners",
+      "kind": "topic"
+    },
+    {
+      "q": "agave syrup",
+      "answer": "agave nectar or agave syrup comes from",
+      "kind": "topic"
+    },
+    {
+      "q": "coconut sugar",
+      "answer": "coconut sugar comes from the sap",
+      "kind": "topic"
+    },
+    {
+      "q": "corn syrup",
+      "answer": "is a product of modern industrial chemistry",
+      "kind": "topic"
+    },
+    {
+      "q": "molasses",
+      "answer": "is what gets left behind",
+      "kind": "topic"
+    },
+    {
+      "q": "date sugar",
+      "answer": "date sugar is different from most",
+      "kind": "topic"
+    },
+    {
+      "q": "explain malt syrup",
+      "answer": "also called barley malt syrup",
+      "kind": "topic"
+    },
+    {
+      "q": "jaggery",
+      "answer": "one of the oldest unrefined",
+      "kind": "topic"
+    },
+    {
+      "q": "raw sugar",
+      "answer": "raw sugar sits somewhere",
+      "kind": "topic"
     },
     {
       "q": "explain photosynthesis",

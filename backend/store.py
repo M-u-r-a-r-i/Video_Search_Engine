@@ -37,6 +37,12 @@ STRONG_SCORE = 1.5            # reranker logit at/above which a match is "strong
 MIN_SCORE = -6.0              # below this a chunk is unrelated and is dropped
 LEAD_IN_SECONDS = 1.0         # jump slightly before the sentence starts
 DEDUPE_SECONDS = 20.0         # results whose jump points are closer are merged
+RELEVANT_SCORE = 0.0          # reranker logit at/above which a passage is "about" the query
+EXPAND_ROUNDS = 3             # rounds of scoring neighbours to find a section's full extent
+SECTION_BONUS = 1.0           # topic searches: rank boost per extra passage in a section (max 3)
+TOPIC_MAX_WORDS = 3           # short non-question searches are treated as topics
+TOPIC_START_MARGIN = 2.5      # topic jump = first sentence scoring within this of the best
+EXPLAINED_MIN_SECONDS = 60.0  # a section this long is an explanation, shorter is a mention
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS videos (
@@ -302,72 +308,169 @@ def _meaning_candidates(conn, video_id: str, query: str, limit: int) -> list[int
     return [int(ids[i]) for i in top]
 
 
+_QUESTION_WORDS = {
+    "what", "why", "how", "when", "who", "whom", "whose", "where", "which",
+    "is", "are", "was", "were", "do", "does", "did", "can", "could",
+    "should", "would", "will",
+}
+_TOPIC_PREFIXES = ("explain", "define", "describe", "overview of", "introduction to",
+                   "intro to", "about")
+
+
+def is_topic_query(query: str) -> bool:
+    """True for "show me where X is covered" searches, False for specific questions.
+
+    Topic searches ("brown sugar", "explain gradient descent") should land where
+    the lecturer *starts* explaining the topic; questions ("who invented sugar
+    cubes?") should land on the sentence that answers them.
+    """
+    q = query.lower().strip()
+    if q.startswith(_TOPIC_PREFIXES):
+        return True
+    words = re.findall(r"[a-z0-9']+", q)
+    if not words or "?" in q or words[0] in _QUESTION_WORDS:
+        return False
+    return len(words) <= TOPIC_MAX_WORDS
+
+
+def group_sections(chunks: list[dict], max_gap: int = 1) -> list[list[dict]]:
+    """Group relevant chunks into sections of consecutive passages (by time).
+
+    Chunk ids are consecutive within a video. Up to *max_gap* unlisted chunks
+    may sit between two members of a section: lecturers often spend a passage
+    on a detail without naming the topic ("it only works in early spring"),
+    and that should not split the explanation in two.
+    """
+    sections: list[list[dict]] = []
+    for c in sorted(chunks, key=lambda c: c["id"]):
+        if sections and c["id"] - sections[-1][-1]["id"] <= 1 + max_gap:
+            sections[-1].append(c)
+        else:
+            sections.append([c])
+    return sections
+
+
+_CHUNK_COLS = "id, first_sent, last_sent, start, end, text"
+
+
+def _score_chunks(conn, video_id: str, query: str) -> dict[int, dict]:
+    """Retrieve candidate chunks, rerank them, and grow relevant runs outward.
+
+    Neighbours of relevant chunks are scored too (a few rounds), so a section's
+    true extent is known even if its middle or edges were not retrieved.
+    """
+    candidates = rrf_fuse(
+        _keyword_candidates(conn, video_id, query, CANDIDATES),
+        _meaning_candidates(conn, video_id, query, CANDIDATES),
+    )[:CANDIDATES]
+    scored: dict[int, dict] = {}
+    to_score = candidates
+    for _ in range(1 + EXPAND_ROUNDS):
+        if not to_score:
+            break
+        marks = ",".join("?" * len(to_score))
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT {_CHUNK_COLS} FROM chunks WHERE video_id = ? AND id IN ({marks})",
+            (video_id, *to_score),
+        )]
+        for c, score in zip(rows, _rerank(query, [c["text"] for c in rows])):
+            c["score"] = score
+            scored[c["id"]] = c
+        # Next round: unscored neighbours (adjacent chunk ids) of relevant chunks.
+        to_score = sorted({
+            n for c in rows if c["score"] >= RELEVANT_SCORE
+            for n in (c["id"] - 1, c["id"] + 1) if n not in scored
+        })
+    return scored
+
+
 def search(video_id: str, query: str, top_k: int = 5) -> list[dict]:
     """Find the moments in a video that answer *query*.
+
+    Relevant passages that follow one another are grouped into a *section*.
+    A section of several passages is where a topic is explained; a lone
+    passage is a passing mention. Explanations rank above mentions for topic
+    searches, and each result appears once instead of once per passage.
 
     Returns:
         Up to *top_k* results, best first::
 
-            {jump_time, sentence, start, end, text, score, strong}
+            {jump_time, sentence, start, end, text, score, strong, kind}
 
-        ``jump_time`` is where playback should start (just before the best
-        sentence); ``start``/``end``/``text`` describe the surrounding chunk.
-        ``strong`` is False for weak matches, which are still shown so a
-        correct answer is never hidden by a hard cutoff.
+        ``jump_time`` is where playback should start: the start of the
+        explanation for topic searches, or the answering sentence for
+        questions. ``start``/``end`` span the whole section, ``text`` is the
+        passage around ``sentence``. ``kind`` is ``"explained"`` (a section of at
+        least a minute) or ``"mention"``. ``strong`` is False for weak matches, which
+        are still shown so a correct answer is never hidden by a hard cutoff.
     """
     query = query.strip()
     if not query:
         return []
+    topic = is_topic_query(query)
 
     with _connect() as conn:
-        candidates = rrf_fuse(
-            _keyword_candidates(conn, video_id, query, CANDIDATES),
-            _meaning_candidates(conn, video_id, query, CANDIDATES),
-        )[:CANDIDATES]
-        if not candidates:
+        scored = _score_chunks(conn, video_id, query)
+        relevant = [c for c in scored.values() if c["score"] >= RELEVANT_SCORE]
+        sections = group_sections(relevant)
+        # Weakly related lone passages fill any remaining slots, so a correct
+        # but low-confidence answer is still offered.
+        covered = {i for sec in sections for i in range(sec[0]["id"], sec[-1]["id"] + 1)}
+        sections += [[c] for c in scored.values()
+                     if c["id"] not in covered and c["score"] >= MIN_SCORE]
+
+        def explained(sec: list[dict]) -> bool:
+            return sec[-1]["end"] - sec[0]["start"] >= EXPLAINED_MIN_SECONDS
+
+        def rank(sec: list[dict]) -> float:
+            best = max(c["score"] for c in sec)
+            if topic and explained(sec) and best >= RELEVANT_SCORE:
+                best += SECTION_BONUS * min(len(sec) - 1, 3)
+            return best
+
+        sections = sorted(sections, key=rank, reverse=True)[:top_k * 2]
+        if not sections:
             return []
 
-        marks = ",".join("?" * len(candidates))
-        rows = {r["id"]: dict(r) for r in conn.execute(
-            f"SELECT id, first_sent, last_sent, start, end, text FROM chunks WHERE id IN ({marks})",
-            candidates,
-        )}
-        chunks = [rows[c] for c in candidates if c in rows]
-        for c, score in zip(chunks, _rerank(query, [c["text"] for c in chunks])):
-            c["score"] = score
-
-        # Keep a few spares: neighbouring chunks overlap and collapse in dedupe.
-        chunks = sorted((c for c in chunks if c["score"] >= MIN_SCORE),
-                        key=lambda c: c["score"], reverse=True)[:top_k * 2]
-        if not chunks:
-            return []
-
-        # Pinpoint: rerank the sentences inside each chunk in one batch.
-        sents_by_chunk = []
-        for c in chunks:
-            sents_by_chunk.append([dict(r) for r in conn.execute(
-                "SELECT start, text FROM sentences WHERE video_id = ? AND idx BETWEEN ? AND ?"
-                " ORDER BY idx",
-                (video_id, c["first_sent"], c["last_sent"]),
+        # Sentences to choose the jump point from: for a topic, the opening of
+        # the section; for a question, the section's single best passage.
+        sents_by_sec = []
+        for sec in sections:
+            pool = sec[:2] if topic else [max(sec, key=lambda c: c["score"])]
+            lo, hi = min(c["first_sent"] for c in pool), max(c["last_sent"] for c in pool)
+            sents_by_sec.append([dict(r) for r in conn.execute(
+                "SELECT idx, start, text FROM sentences WHERE video_id = ? AND idx BETWEEN ? AND ?"
+                " ORDER BY idx", (video_id, lo, hi),
             )])
-    flat = [s for sents in sents_by_chunk for s in sents]
+
+    flat = [s for sents in sents_by_sec for s in sents]
     for s, score in zip(flat, _rerank(query, [s["text"] for s in flat])):
         s["score"] = score
 
     results: list[dict] = []
-    for c, sents in zip(chunks, sents_by_chunk):
-        best = max(sents, key=lambda s: s["score"]) if sents else {"start": c["start"], "text": c["text"]}
+    for sec, sents in zip(sections, sents_by_sec):
+        if not sents:
+            continue
+        best = max(sents, key=lambda s: s["score"])
+        if topic and explained(sec):
+            # Where the explanation starts: the first sentence that is itself
+            # about the topic and nearly as relevant as the best one.
+            floor = max(best["score"] - TOPIC_START_MARGIN, RELEVANT_SCORE)
+            best = next((s for s in sents if s["score"] >= floor), best)
         jump = round(max(0.0, best["start"] - LEAD_IN_SECONDS), 2)
         if any(abs(jump - r["jump_time"]) < DEDUPE_SECONDS for r in results):
-            continue  # same moment already reported by a higher-ranked chunk
+            continue  # same moment already reported by a higher-ranked section
+        host = next((c for c in sec if c["first_sent"] <= best["idx"] <= c["last_sent"]), sec[0])
+        top = max(c["score"] for c in sec)
         results.append({
             "jump_time": jump,
             "sentence": best["text"],
-            "start": c["start"],
-            "end": c["end"],
-            "text": c["text"],
-            "score": round(c["score"], 3),
-            "strong": c["score"] >= STRONG_SCORE,
+            "start": sec[0]["start"],
+            "end": sec[-1]["end"],
+            "text": host["text"],
+            "score": round(top, 3),
+            "strong": top >= STRONG_SCORE,
+            "kind": "explained" if explained(sec) else "mention",
         })
         if len(results) == top_k:
             break
