@@ -12,6 +12,7 @@ env/
 ENV/
 
 # ---- Project-generated data (regenerated at runtime) ----
+data/
 chroma_db/
 temp_data/
 *.wav
@@ -33,3 +34,7 @@ Thumbs.db
 # ---- Local-only docs (not part of the public repo) ----
 documentation.md
 project_explanation.txt
+PROJECT_DEEP_DIVE.md
+
+# ---- Benchmark cache ----
+benchmarks/.cache/

@@ -1,21 +1,28 @@
 """
 app.py
-Streamlit frontend for the VideoRAG application — Dark premium, no sidebar.
+Streamlit frontend for VideoRAG — search what is said in a lecture and jump to
+the exact second.
 """
 
 import os
 import html
 import hashlib
+import logging
+
 import streamlit as st
 
+from backend.paths import VIDEO_DIR
 from backend.processor import (
+    ProcessingError,
+    probe_video,
     extract_audio,
     transcribe_audio,
-    extract_frames,
-    cleanup_artifacts,
-    TEMP_DIR,
+    cleanup_audio,
 )
-from backend.vector_store import add_video, add_video_frames, search, has_video
+from backend.store import index_video, is_indexed, get_video, search
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("videorag")
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -371,48 +378,117 @@ video {
 """
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+st.markdown(
+    """
+<style>
+.result-card .sentence-mark {
+    background: rgba(139,92,246,0.18);
+    color: #E4E4E7;
+    border-radius: 4px;
+    padding: 0 0.15rem;
+}
+.result-card .score-badge.weak {
+    color: #FACC15;
+    background: rgba(234,179,8,0.08);
+    border-color: rgba(234,179,8,0.2);
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 
 # ---------------------------------------------------------------------------
-# Session state defaults
+# Session state
 # ---------------------------------------------------------------------------
-def _init_state():
-    defaults = {
-        "video_id": None,
-        "video_path": None,
-        "processed": False,
-        "seek_time": 0,
-        "results": [],
-        "match_type": "",
-        "last_query": "",
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
-_init_state()
+DEFAULT_STATE = {
+    "video_id": None,
+    "video_path": None,
+    "video_name": None,
+    "ready": False,
+    "seek_time": 0,
+    "results": [],
+    "last_query": "",
+}
+for _k, _v in DEFAULT_STATE.items():
+    st.session_state.setdefault(_k, _v)
 
 
 # ---------------------------------------------------------------------------
-# Helper: format seconds -> mm:ss
+# Helpers
 # ---------------------------------------------------------------------------
 def _fmt(seconds: float) -> str:
-    m, s = divmod(int(seconds), 60)
-    return f"{m:02d}:{s:02d}"
+    """Format seconds as m:ss, or h:mm:ss for long lectures."""
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-# ---------------------------------------------------------------------------
-# Helper: build a single result card HTML (no indentation!)
-# ---------------------------------------------------------------------------
-def _card_html(idx: int, ts_label: str, excerpt: str, score: float) -> str:
+def _card_html(idx: int, r: dict) -> str:
+    """Result card: the chunk text with the pinpointed sentence highlighted."""
+    context = html.escape(r["text"])
+    sentence = html.escape(r["sentence"])
+    if sentence and sentence in context:
+        context = context.replace(
+            sentence, f'<span class="sentence-mark">{sentence}</span>', 1
+        )
+    badge = ('<span class="score-badge">strong match</span>' if r["strong"]
+             else '<span class="score-badge weak">weak match</span>')
     return (
         f'<div class="result-card" style="animation-delay:{idx*0.06}s">'
-        f'<div class="timestamp">⏱ {ts_label}</div>'
-        f'<div class="excerpt">{html.escape(excerpt)}</div>'
-        f'<span class="score-badge">relevance: {score:.2f}</span>'
+        f'<div class="timestamp">⏱ {_fmt(r["jump_time"])}</div>'
+        f'<div class="excerpt">{context}</div>'
+        f'{badge}'
         f'</div>'
     )
+
+
+def _save_upload(uploaded) -> tuple[str, str]:
+    """Persist an upload under a content-hash name. Returns ``(video_id, path)``.
+
+    Naming by content means two different files called ``lecture.mp4`` never
+    overwrite each other, and re-uploading a renamed copy reuses its index.
+    """
+    data = uploaded.getbuffer()
+    video_id = hashlib.md5(data).hexdigest()[:16]
+    ext = os.path.splitext(uploaded.name)[1].lower() or ".mp4"
+    path = os.path.join(VIDEO_DIR, video_id + ext)
+    if not os.path.exists(path):
+        os.makedirs(VIDEO_DIR, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+    return video_id, path
+
+
+def _process(video_id: str, path: str, name: str) -> bool:
+    """Transcribe and index a video, reporting progress. Returns True on success."""
+    try:
+        with st.status("Processing video…", expanded=True) as status:
+            info = probe_video(path)
+            st.write("🎵 Extracting audio…")
+            audio_path = extract_audio(path, video_id)
+            st.write(f"🗣️ Transcribing {_fmt(info['duration'])} of speech…")
+            bar = st.progress(0.0)
+            sentences = transcribe_audio(
+                audio_path,
+                info["duration"],
+                on_progress=lambda p: bar.progress(p, text=f"{p:.0%} transcribed"),
+            )
+            bar.progress(1.0, text="100% transcribed")
+            st.write(f"📦 Indexing {len(sentences)} sentences…")
+            n_chunks = index_video(video_id, name, path, info["duration"], sentences)
+            status.update(label=f"✅ Done — {len(sentences)} sentences indexed "
+                                f"({n_chunks} search passages)", state="complete")
+        return True
+    except ProcessingError as exc:
+        st.error(str(exc))
+    except Exception:
+        logger.exception("Processing failed for %s", path)
+        st.error("Something went wrong while processing this video. "
+                 "The details are in the terminal running the app.")
+    finally:
+        cleanup_audio(video_id)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -421,17 +497,16 @@ def _card_html(idx: int, ts_label: str, excerpt: str, score: float) -> str:
 st.markdown(
     '<div class="hero-wrapper">'
     '<div class="hero-heading">🎬 VideoRAG</div>'
-    '<p class="hero-sub">Upload a video and search its content with natural language.</p>'
+    '<p class="hero-sub">Upload a lecture and find the exact moment anything is said.</p>'
     '<div class="hero-divider"></div>'
     '</div>',
     unsafe_allow_html=True,
 )
 
 # ---------------------------------------------------------------------------
-# STATE: No video loaded yet — show upload
+# STATE: No video ready yet — upload and process
 # ---------------------------------------------------------------------------
-if not st.session_state.video_path or not st.session_state.processed:
-
+if not st.session_state.ready:
     uploaded = st.file_uploader(
         "Drop a video file here",
         type=["mp4", "mkv", "webm", "mov", "avi"],
@@ -439,167 +514,101 @@ if not st.session_state.video_path or not st.session_state.processed:
     )
 
     if uploaded is not None:
-        os.makedirs(TEMP_DIR, exist_ok=True)
-        save_path = os.path.join(TEMP_DIR, uploaded.name)
+        video_id, path = _save_upload(uploaded)
+        st.session_state.update(
+            video_id=video_id, video_path=path, video_name=uploaded.name,
+            results=[], last_query="", seek_time=0,
+        )
+        if is_indexed(video_id):  # already processed earlier: open it instantly
+            st.session_state.ready = True
+            st.rerun()
 
-        if st.session_state.video_path != save_path:
-            data = uploaded.getbuffer()
-            with open(save_path, "wb") as f:
-                f.write(data)
-            st.session_state.video_path = save_path
-            # Content-based id: identical videos share an index regardless of
-            # filename, and a rename never forces a needless reprocess.
-            st.session_state.video_id = hashlib.md5(data).hexdigest()[:12]
-            st.session_state.results = []
-            st.session_state.seek_time = 0
-            st.session_state.last_query = ""
-            # Skip processing entirely if this video is already indexed.
-            st.session_state.processed = has_video(st.session_state.video_id)
-            if st.session_state.processed:
-                st.rerun()
-
-        if not st.session_state.processed:
-            st.markdown("<br>", unsafe_allow_html=True)
-            _l, col_btn, _r = st.columns([1, 2, 1])
-            with col_btn:
-                if st.button("⚡ Process Video", use_container_width=True):
-                    with st.status("Processing video…", expanded=True) as status:
-                        st.write("🎵 Extracting audio…")
-                        audio_path = extract_audio(save_path)
-                        st.write("🗣️ Transcribing speech…")
-                        segments = transcribe_audio(audio_path)
-                        st.write(f"📦 Embedding {len(segments)} segments…")
-                        n_chunks = add_video(st.session_state.video_id, segments)
-                        st.write("🖼️ Extracting video frames…")
-                        frames = extract_frames(
-                            save_path, st.session_state.video_id
-                        )
-                        n_frames = 0
-                        if frames:
-                            st.write(f"🧠 Embedding {len(frames)} frames with CLIP…")
-                            n_frames = add_video_frames(
-                                st.session_state.video_id, frames
-                            )
-                        st.write("🧹 Cleaning up temporary files…")
-                        cleanup_artifacts(save_path, st.session_state.video_id)
-                        status.update(
-                            label=f"✅ Done — {n_chunks} text chunks + {n_frames} frames indexed",
-                            state="complete",
-                        )
-                    st.session_state.processed = True
+        st.markdown("<br>", unsafe_allow_html=True)
+        _l, col_btn, _r = st.columns([1, 2, 1])
+        with col_btn:
+            if st.button("⚡ Process Video", use_container_width=True):
+                if _process(video_id, path, uploaded.name):
+                    st.session_state.ready = True
                     st.rerun()
     else:
         st.markdown(
             '<div class="empty-state">'
             '<div class="empty-icon">📂</div>'
-            '<p class="empty-msg">Drop a <strong>video file</strong> above to get started.</p>'
+            '<p class="empty-msg">Drop a <strong>lecture video</strong> above to get started.</p>'
             '</div>',
             unsafe_allow_html=True,
         )
 
-
 # ---------------------------------------------------------------------------
-# STATE: Video processed — player + search + results
+# STATE: Video ready — player + search + results
 # ---------------------------------------------------------------------------
 else:
-    # Badge
-    fname = os.path.basename(st.session_state.video_path)
+    video = get_video(st.session_state.video_id) or {}
     st.markdown(
-        f'<div class="active-video-badge">📹 {fname}</div>',
+        f'<div class="active-video-badge">📹 {html.escape(st.session_state.video_name or "")}</div>',
         unsafe_allow_html=True,
     )
-
-    # Video player — full width
     st.video(st.session_state.video_path, start_time=int(st.session_state.seek_time))
 
-    # Search bar
-    st.markdown("<br>", unsafe_allow_html=True)
-    _sl, col_search, _sr = st.columns([0.5, 5, 0.5])
-    with col_search:
-        query = st.text_input(
-            "Search",
-            placeholder="e.g. 'When does the speaker mention deadlines?'",
-            label_visibility="collapsed",
-        )
-
-    # Run search
-    if query and query != st.session_state.last_query:
-        with st.spinner("🔍 Searching video content…"):
-            result = search(
-                st.session_state.video_id, query, top_k=5
-            )
-        st.session_state.results = result.get("results", [])
-        st.session_state.match_type = result.get("match_type", "")
-        st.session_state.last_query = query
-
-    # ---------- Show results ----------
-    if st.session_state.last_query and st.session_state.match_type == "none":
-        # No results at all
-        st.markdown(
-            '<div class="no-results">'
-            '<div class="nr-icon">🔎</div>'
-            '<p class="nr-msg">No matching content found for '
-            f'<strong>"{html.escape(st.session_state.last_query)}"</strong>. '
-            'Try a different query.</p>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-    elif st.session_state.results:
+    if video.get("chunks", 0) == 0:
+        st.warning("No speech was detected in this video, so there is nothing to search.")
+    else:
         st.markdown("<br>", unsafe_allow_html=True)
+        _sl, col_search, _sr = st.columns([0.5, 5, 0.5])
+        with col_search:
+            query = st.text_input(
+                "Search",
+                placeholder="e.g. 'When does the professor explain backpropagation?'",
+                label_visibility="collapsed",
+            )
 
-        # Fallback banner (keyword-only matches)
-        if st.session_state.match_type == "keyword":
+        if query and query != st.session_state.last_query:
+            with st.spinner("🔍 Searching the lecture…"):
+                st.session_state.results = search(st.session_state.video_id, query, top_k=5)
+            st.session_state.last_query = query
+
+        results = st.session_state.results
+        if st.session_state.last_query and not results:
             st.markdown(
-                '<div class="fallback-banner">'
-                '<span class="fb-icon">⚠️</span>'
-                '<span class="fb-title">Approximate matches</span>'
-                '<p class="fb-msg">I couldn\'t find the exact context you asked for. '
-                'Here are the closest timestamps where related keywords appear:</p>'
+                '<div class="no-results">'
+                '<div class="nr-icon">🔎</div>'
+                '<p class="nr-msg">Nothing in this lecture matches '
+                f'<strong>"{html.escape(st.session_state.last_query)}"</strong>. '
+                'Try different words.</p>'
                 '</div>',
                 unsafe_allow_html=True,
             )
+        elif results:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if not any(r["strong"] for r in results):
+                st.markdown(
+                    '<div class="fallback-banner">'
+                    '<span class="fb-icon">⚠️</span>'
+                    '<span class="fb-title">No strong match</span>'
+                    '<p class="fb-msg">These are the closest moments — '
+                    'check them, or try rephrasing your question.</p>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+            st.markdown(
+                '<p class="results-panel-title">Search Results</p>'
+                f'<p class="results-panel-query">"{html.escape(st.session_state.last_query)}"</p>',
+                unsafe_allow_html=True,
+            )
+            for idx, r in enumerate(results):
+                col_btn, col_card = st.columns([1, 6], vertical_alignment="center")
+                with col_btn:
+                    if st.button(f"▶ {_fmt(r['jump_time'])}", key=f"seek_{idx}",
+                                 use_container_width=True):
+                        st.session_state.seek_time = r["jump_time"]
+                        st.rerun()
+                with col_card:
+                    st.markdown(_card_html(idx, r), unsafe_allow_html=True)
 
-        # Results header
-        st.markdown(
-            '<p class="results-panel-title">Search Results</p>'
-            f'<p class="results-panel-query">"{html.escape(st.session_state.last_query)}"</p>',
-            unsafe_allow_html=True,
-        )
-
-        # Result cards — rendered as HTML
-        cards = ""
-        for idx, r in enumerate(st.session_state.results):
-            ts = f"{_fmt(r['start_time'])} → {_fmt(r['end_time'])}"
-            txt = r["text"][:200] + ("…" if len(r["text"]) > 200 else "")
-            cards += _card_html(idx, ts, txt, r["score"])
-
-        st.markdown(cards, unsafe_allow_html=True)
-
-        # Jump-to-timestamp buttons
-        st.markdown(
-            '<p class="section-label" style="margin-top:1rem;">Jump to timestamp</p>',
-            unsafe_allow_html=True,
-        )
-        btn_cols = st.columns(min(len(st.session_state.results), 5))
-        for idx, r in enumerate(st.session_state.results):
-            ts = f"{_fmt(r['start_time'])}–{_fmt(r['end_time'])}"
-            with btn_cols[idx]:
-                if st.button(f"▶ {ts}", key=f"seek_{idx}"):
-                    st.session_state.seek_time = r["start_time"]
-                    st.rerun()
-
-    # New video button
+    # New video
     st.markdown("<br>", unsafe_allow_html=True)
     _bl, col_new, _br = st.columns([2, 1, 2])
     with col_new:
         if st.button("🔄 New Video", use_container_width=True):
-            for k in ("video_path", "video_id", "processed", "results", "match_type", "seek_time", "last_query"):
-                st.session_state[k] = None if k in ("video_path", "video_id") else (
-                    False if k == "processed" else (
-                        [] if k == "results" else (
-                            0 if k == "seek_time" else ""
-                        )
-                    )
-                )
+            st.session_state.update(DEFAULT_STATE)
             st.rerun()

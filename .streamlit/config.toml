@@ -1,0 +1,3 @@
+[server]
+# Full-length lectures are often 0.5-2 GB; Streamlit's default limit is 200 MB.
+maxUploadSize = 4096
