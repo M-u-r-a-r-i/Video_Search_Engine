@@ -5,33 +5,57 @@ worker thread, while the website polls their progress.
 """
 
 import logging
+import os
 import queue
+import shutil
 import threading
 import time
 from collections.abc import Callable
 
 from backend import processor, store
+from backend.paths import FRAMES_DIR
 
 logger = logging.getLogger(__name__)
 
 Reporter = Callable[[str, float], None]   # (stage label, progress 0..1)
 
 
-def process_video(video_id: str, path: str, name: str, report: Reporter) -> None:
-    """Full pipeline for one video: probe → audio → transcribe → index → clean up."""
-    try:
-        info = processor.probe_video(path)
-        report("Extracting audio", 0.0)
-        audio_path = processor.extract_audio(path, video_id)
-        report("Transcribing speech", 0.0)
-        sentences = processor.transcribe_audio(
-            audio_path, info["duration"],
-            on_progress=lambda p: report("Transcribing speech", p),
-        )
-        report("Building search index", 1.0)
-        store.index_video(video_id, name, path, info["duration"], sentences)
-    finally:
-        processor.cleanup_audio(video_id)
+def process_video(video_id: str, path: str, name: str, report: Reporter, *,
+                  audio: bool = True, visual: bool = False) -> None:
+    """Pipeline for one video.
+
+    audio:  probe → extract audio → transcribe → index speech. After this
+            step the lecture is searchable, even if visuals are still running.
+    visual: key frames → on-screen text (OCR) + picture embeddings (CLIP).
+            Optional and opt-in, because it is slower and needs extra models.
+    """
+    if audio:
+        try:
+            info = processor.probe_video(path)
+            report("Extracting audio", 0.0)
+            audio_path = processor.extract_audio(path, video_id)
+            report("Transcribing speech", 0.0)
+            sentences = processor.transcribe_audio(
+                audio_path, info["duration"],
+                on_progress=lambda p: report("Transcribing speech", p),
+            )
+            report("Building search index", 1.0)
+            store.index_video(video_id, name, path, info["duration"], sentences)
+        finally:
+            processor.cleanup_audio(video_id)
+    if visual:
+        from backend import visual as vis
+        video = store.get_video(video_id)
+        duration = video["duration"] if video else processor.probe_video(path)["duration"]
+        thumbs = os.path.join(FRAMES_DIR, video_id)
+        shutil.rmtree(thumbs, ignore_errors=True)
+        try:
+            frames = vis.analyse_video(path, thumbs, duration, report)
+            report("Building visual index", 1.0)
+            store.index_frames(video_id, frames)
+        except BaseException:
+            shutil.rmtree(thumbs, ignore_errors=True)
+            raise
 
 
 class JobManager:
@@ -43,7 +67,7 @@ class JobManager:
     uploaded again.
     """
 
-    def __init__(self, pipeline: Callable[[str, str, str, Reporter], None] = process_video):
+    def __init__(self, pipeline: Callable[..., None] = process_video):
         self._pipeline = pipeline
         self._queue: queue.Queue[str] = queue.Queue()
         self._jobs: dict[str, dict] = {}
@@ -51,8 +75,12 @@ class JobManager:
         self._thread = threading.Thread(target=self._run, name="videorag-worker", daemon=True)
         self._thread.start()
 
-    def submit(self, video_id: str, path: str, name: str) -> dict:
-        """Queue a video unless it is already queued or processing."""
+    def submit(self, video_id: str, path: str, name: str, *,
+               audio: bool = True, visual: bool = False) -> dict:
+        """Queue a video unless it is already queued or processing.
+
+        ``audio=False, visual=True`` adds visual search to an indexed video.
+        """
         with self._lock:
             job = self._jobs.get(video_id)
             if job and job["status"] in ("queued", "processing"):
@@ -61,6 +89,7 @@ class JobManager:
                 "video_id": video_id, "name": name, "path": path,
                 "status": "queued", "stage": "Waiting in queue", "progress": 0.0,
                 "error": None, "submitted_at": time.time(),
+                "audio": audio, "visual": visual,
             }
             self._jobs[video_id] = job
         self._queue.put(video_id)
@@ -106,7 +135,8 @@ class JobManager:
                 def report(stage: str, progress: float, _vid=video_id) -> None:
                     self._update(_vid, stage=stage, progress=round(progress, 3))
 
-                self._pipeline(video_id, job["path"], job["name"], report)
+                self._pipeline(video_id, job["path"], job["name"], report,
+                               audio=job["audio"], visual=job["visual"])
                 self._update(video_id, status="ready", stage="Done", progress=1.0)
             except processor.ProcessingError as exc:
                 self._update(video_id, status="error", error=str(exc))

@@ -20,6 +20,10 @@ def _warm_up_models() -> None:
     try:
         store._get_embed_model()
         store._get_reranker()
+        # CLIP is only needed (and only downloaded) once a lecture uses visual search.
+        if any(v["visual"] for v in store.list_videos()):
+            from backend import visual
+            visual._get_clip()
         logging.getLogger("videorag").info("Search models loaded.")
     except Exception:
         logging.getLogger("videorag").exception("Could not preload search models")

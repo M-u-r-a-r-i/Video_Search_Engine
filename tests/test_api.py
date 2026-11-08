@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -10,17 +12,55 @@ from backend.processor import ProcessingError
 from test_store import LECTURE, _fake_embed, _fake_rerank
 
 
-def fake_pipeline(video_id, path, name, report):
-    """Stands in for ffmpeg + Whisper: indexes a canned transcript."""
-    report("Transcribing speech", 0.5)
+def _unit(i, dim=512):
+    v = np.zeros(dim, dtype=np.float32)
+    v[i] = 1.0
+    return v
+
+
+# Key frames of the fake lecture: two slides with text, then pictures.
+FAKE_FRAMES = [
+    {"start": 0.0, "end": 20.0, "text": "Welcome to Optimisation 101", "embedding": _unit(0)},
+    {"start": 20.0, "end": 45.0, "text": "Gradient Descent: w = w - lr * grad", "embedding": _unit(1)},
+] + [
+    {"start": 45.0 + 25 * k, "end": 70.0 + 25 * k, "text": "", "embedding": _unit(2 + k)}
+    for k in range(6)
+]
+CAT_FRAME = 7   # the last frame "shows a cat"
+
+PIPELINE_CALLS = []
+
+
+def fake_pipeline(video_id, path, name, report, audio=True, visual=False):
+    """Stands in for ffmpeg + Whisper (+ OCR/CLIP): indexes canned data."""
+    PIPELINE_CALLS.append({"video_id": video_id, "audio": audio, "visual": visual})
     with open(path, "rb") as f:
         content = f.read()
-    if content.startswith(b"NOAUDIO"):
-        raise ProcessingError("This video has no audio track, so there is no speech to search.")
-    if content.startswith(b"CRASH"):
-        raise RuntimeError("boom")
-    sentences = [] if content.startswith(b"SILENT") else LECTURE
-    store.index_video(video_id, name, path, 60.0, sentences)
+    if audio:
+        report("Transcribing speech", 0.5)
+        if content.startswith(b"NOAUDIO"):
+            raise ProcessingError("This video has no audio track, so there is no speech to search.")
+        if content.startswith(b"CRASH"):
+            raise RuntimeError("boom")
+        sentences = [] if content.startswith(b"SILENT") else LECTURE
+        store.index_video(video_id, name, path, 60.0, sentences)
+    if visual:
+        report("Reading slides and on-screen text", 0.5)
+        if content.startswith(b"VISFAIL"):
+            raise ProcessingError("Could not read the video frames.")
+        thumbs = os.path.join(api.FRAMES_DIR, video_id)
+        os.makedirs(thumbs, exist_ok=True)
+        for i in range(len(FAKE_FRAMES)):
+            Path(thumbs, f"{i:05d}.jpg").write_bytes(b"fake-jpeg")
+        store.index_frames(video_id, FAKE_FRAMES)
+
+
+def fake_clip_text(query):
+    """'cat' queries point at the cat frame; anything else matches nothing in particular."""
+    if "cat" in query.lower():
+        return _unit(2 + 5)
+    v = np.full(512, 0.01, dtype=np.float32)
+    return v / np.linalg.norm(v)
 
 
 @pytest.fixture
@@ -30,15 +70,22 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_embed", _fake_embed)
     monkeypatch.setattr(store, "_rerank", _fake_rerank)
     monkeypatch.setattr(api, "VIDEO_DIR", str(tmp_path / "videos"))
+    monkeypatch.setattr(api, "FRAMES_DIR", str(tmp_path / "frames"))
+    monkeypatch.setattr(store, "_clip_text", fake_clip_text)
     store._emb_cache.clear()
+    store._frame_cache.clear()
+    PIPELINE_CALLS.clear()
     jobs = JobManager(pipeline=fake_pipeline)
     with TestClient(api.create_app(jobs)) as c:
         c.jobs = jobs
         yield c
 
 
-def upload(client, content=b"VIDEO-BYTES-1", filename="Lecture 1.mp4"):
-    return client.post("/api/videos", params={"filename": filename}, content=content)
+def upload(client, content=b"VIDEO-BYTES-1", filename="Lecture 1.mp4", visual=False):
+    params = {"filename": filename}
+    if visual:
+        params["visual"] = "true"
+    return client.post("/api/videos", params=params, content=content)
 
 
 def test_website_is_served(client):
@@ -121,3 +168,64 @@ def test_delete_removes_video_and_index(client):
     assert client.get(f"/api/videos/{vid}").status_code == 404
     assert client.get("/api/videos").json() == []
     assert not list(Path(api.VIDEO_DIR).glob("*.mp4"))
+
+
+# ---------------------------------------------------------------- visual search (opt-in)
+def test_visual_is_off_by_default(client):
+    vid = upload(client).json()["id"]
+    client.jobs.wait_idle()
+    assert client.get(f"/api/videos/{vid}").json()["visual"] == "off"
+    res = client.get(f"/api/videos/{vid}/search", params={"q": "gradient descent"}).json()
+    assert res["visual_enabled"] is False and res["visual"] == []
+    assert PIPELINE_CALLS == [{"video_id": vid, "audio": True, "visual": False}]
+
+
+def test_upload_with_visual_finds_slide_text_and_pictures(client):
+    vid = upload(client, visual=True).json()["id"]
+    client.jobs.wait_idle()
+    assert client.get(f"/api/videos/{vid}").json()["visual"] == "on"
+
+    res = client.get(f"/api/videos/{vid}/search", params={"q": "gradient descent"}).json()
+    assert res["visual_enabled"] is True
+    slide = res["visual"][0]
+    assert slide["source"] == "text" and slide["frame"] == 1 and "Gradient Descent" in slide["text"]
+    assert slide["jump_time"] == pytest.approx(20.0 - store.FRAME_LEAD_IN)
+
+    res = client.get(f"/api/videos/{vid}/search", params={"q": "a photo of a cat"}).json()
+    pics = [r for r in res["visual"] if r["source"] == "image"]
+    assert pics and pics[0]["frame"] == CAT_FRAME
+
+
+def test_unrelated_query_shows_nothing_on_screen(client):
+    vid = upload(client, visual=True).json()["id"]
+    client.jobs.wait_idle()
+    res = client.get(f"/api/videos/{vid}/search", params={"q": "zebra xylophone"}).json()
+    assert res["visual"] == []
+
+
+def test_enable_visual_later_without_retranscribing(client):
+    vid = upload(client).json()["id"]
+    client.jobs.wait_idle()
+    r = client.post(f"/api/videos/{vid}/visual")
+    assert r.status_code == 202 and r.json()["visual"] in ("processing", "on")
+    client.jobs.wait_idle()
+    assert client.get(f"/api/videos/{vid}").json()["visual"] == "on"
+    assert PIPELINE_CALLS[-1] == {"video_id": vid, "audio": False, "visual": True}
+
+
+def test_visual_failure_keeps_speech_search_working(client):
+    vid = upload(client, b"VISFAIL...", "lecture.mp4", visual=True).json()["id"]
+    client.jobs.wait_idle()
+    v = client.get(f"/api/videos/{vid}").json()
+    assert v["status"] == "ready" and v["visual"] == "error" and "frames" in v["visual_error"]
+    assert client.get(f"/api/videos/{vid}/search", params={"q": "learning rate"}).json()["results"]
+
+
+def test_frame_thumbnails_and_cleanup(client):
+    vid = upload(client, visual=True).json()["id"]
+    client.jobs.wait_idle()
+    assert client.get(f"/api/videos/{vid}/frames/1.jpg").status_code == 200
+    assert client.get(f"/api/videos/{vid}/frames/99.jpg").status_code == 404
+    client.delete(f"/api/videos/{vid}")
+    assert not Path(api.FRAMES_DIR, vid).exists()
+    assert not store.has_visual(vid)

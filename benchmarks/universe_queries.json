@@ -1,0 +1,45 @@
+{
+  "video": "The Universe Tried to Hide the Gravity Particle (PBS Space Time, YouTube id Z4DqSFrl92k, ~18.6 min)",
+  "url": "https://www.youtube.com/watch?v=Z4DqSFrl92k",
+  "note": "'answer' = phrase as Whisper transcribed it (list = any of them). 'screen' = time ranges (s) where the answer is visible on screen. 'picture' queries describe an image and have no spoken answer.",
+  "queries": [
+    {"q": "what is a phonon", "answer": "are called phonons"},
+    {"q": "why is detecting a graviton so hard", "answer": ["elementary quantum particles are tiny", "graviton has only a minuscule chance"], "screen": [[196, 214]]},
+    {"q": "how cold does the bar need to be", "answer": "cooled to 1 milli kelvin", "screen": [[458, 484]]},
+    {"q": "when was the first gravitational wave detected", "answer": "we detected our first gravitational wave"},
+    {"q": "how many gravitons are in a gravitational wave", "answer": "10 to the power of 36 gravitons"},
+    {"q": "what sources of noise produce phonons", "answer": ["seismic noise", "any source of noise can produce one"], "screen": [[322, 342]]},
+    {"q": "does the photoelectric effect prove that photons exist", "answer": ["photoelectric effect is really the discovery of quantum energy levels", "didn't really constitute the discovery of photons", "this is wrong"], "screen": [[698, 706]]},
+    {"q": "what happens if the light frequency is below the threshold", "answer": "below a certain threshold"},
+    {"q": "how would we know a graviton passed through the detector", "answer": ["independent way to know", "coincides with a ligo detection", "same time that ligo detects"], "screen": [[352, 370]]},
+    {"q": "what temperature can labs reach today", "answer": "few hundred milli kelvin"},
+    {"q": "how is the optical bar different from LIGO", "answer": "unlike ligo which reads out a phase change", "screen": [[868, 884]]},
+    {"q": "why can't the detector run only sometimes", "answer": "we don't know when a gravitational wave is going to hit us", "screen": [[510, 530]]},
+
+    {"q": "quantum sensing", "answer": ["the use of quantum sensing", "using quantum sensing techniques"], "screen": [[290, 302]], "kind": "topic"},
+    {"q": "photoelectric effect", "answer": ["back to the phenomenon that started", "take a pair of conducting plates"], "screen": [[582, 590]], "kind": "topic"},
+    {"q": "resonant mass detector", "answer": ["proposes with its resonant mass detector", "make a quantum particle bigger"], "kind": "topic"},
+    {"q": "gravitational waves", "answer": ["we detected our first gravitational wave", "gravitational wave really is just a coherent flood"], "kind": "topic"},
+
+    {"q": "beryllium bar", "answer": "burillion bar", "screen": [[434, 442]], "kind": "exact"},
+    {"q": "niobium", "answer": "neobium bar", "screen": [[442, 458]], "kind": "exact"},
+    {"q": "Schützhold", "answer": "ralph schuttold", "screen": [[834, 838]], "kind": "exact"},
+    {"q": "phonon detector", "answer": "phone on detector", "screen": [[560, 572], [738, 754]], "kind": "exact"},
+    {"q": "LIGO beam splitter", "answer": "with ligo", "screen": [[386, 398]], "kind": "exact"},
+    {"q": "neutron star merger", "answer": "neutron star merger", "screen": [[434, 442]], "kind": "exact"},
+
+    {"q": "two black holes merging", "answer": null, "screen": [[442, 458]], "kind": "picture"},
+    {"q": "a metal cylinder", "answer": null, "screen": [[226, 256], [420, 458], [476, 506], [720, 736]], "kind": "picture"},
+    {"q": "t-shirts and hoodies", "answer": null, "screen": [[86, 98]], "kind": "picture"},
+    {"q": "a phone app with a quiz", "answer": null, "screen": [[1016, 1060]], "kind": "picture"},
+    {"q": "a green laser beam", "answer": null, "screen": [[100, 128], [838, 860]], "kind": "picture"},
+    {"q": "an atom with an electron", "answer": null, "screen": [[676, 698]], "kind": "picture"},
+    {"q": "a thermometer", "answer": null, "screen": [[226, 256]], "kind": "picture"},
+    {"q": "a circuit with two metal plates", "answer": null, "screen": [[586, 632]], "kind": "picture"},
+    {"q": "a warning sign", "answer": null, "screen": [[198, 214], [342, 352], [510, 530], [800, 816], [906, 920]], "kind": "picture"},
+
+    {"q": "explain photosynthesis", "answer": null},
+    {"q": "who won the world cup", "answer": null},
+    {"q": "how to bake bread", "answer": null}
+  ]
+}

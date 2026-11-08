@@ -72,6 +72,25 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 CREATE INDEX IF NOT EXISTS chunks_video ON chunks(video_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, video_id UNINDEXED);
+
+-- Optional visual index (only for videos where the user enabled it).
+CREATE TABLE IF NOT EXISTS visual_index (
+    video_id   TEXT PRIMARY KEY,
+    frames     INTEGER NOT NULL,
+    indexed_at REAL    NOT NULL
+);
+CREATE TABLE IF NOT EXISTS frames (
+    id             INTEGER PRIMARY KEY,
+    video_id       TEXT    NOT NULL,
+    idx            INTEGER NOT NULL,
+    start          REAL    NOT NULL,
+    end            REAL    NOT NULL,
+    text           TEXT    NOT NULL,
+    text_embedding BLOB,
+    clip_embedding BLOB    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS frames_video ON frames(video_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS frames_fts USING fts5(text, video_id UNINDEXED);
 """
 
 # ---------------------------------------------------------------------------
@@ -208,6 +227,9 @@ def get_video(video_id: str) -> dict | None:
         video["chunks"] = conn.execute(
             "SELECT COUNT(*) FROM chunks WHERE video_id = ?", (video_id,)
         ).fetchone()[0]
+        video["visual"] = conn.execute(
+            "SELECT 1 FROM visual_index WHERE video_id = ?", (video_id,)
+        ).fetchone() is not None
         return video
 
 
@@ -216,7 +238,8 @@ def list_videos() -> list[dict]:
     with _connect() as conn:
         return [dict(r) for r in conn.execute(
             "SELECT v.id, v.name, v.path, v.duration, v.indexed_at,"
-            "       (SELECT COUNT(*) FROM chunks c WHERE c.video_id = v.id) AS chunks"
+            "       (SELECT COUNT(*) FROM chunks c WHERE c.video_id = v.id) AS chunks,"
+            "       EXISTS (SELECT 1 FROM visual_index x WHERE x.video_id = v.id) AS visual"
             " FROM videos v ORDER BY v.indexed_at DESC"
         )]
 
@@ -224,8 +247,10 @@ def list_videos() -> list[dict]:
 def delete_video(video_id: str) -> None:
     with _connect() as conn:
         _delete_rows(conn, video_id)
+        _delete_frames(conn, video_id)
     with _emb_cache_lock:
         _emb_cache.pop(video_id, None)
+        _frame_cache.pop(video_id, None)
 
 
 def _delete_rows(conn: sqlite3.Connection, video_id: str) -> None:
@@ -481,6 +506,150 @@ def search(video_id: str, query: str, top_k: int = 5) -> list[dict]:
             "score": round(top, 3),
             "strong": top >= STRONG_SCORE,
             "kind": "explained" if explained(sec) else "mention",
+        })
+        if len(results) == top_k:
+            break
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Visual index (optional): key frames with on-screen text and CLIP embeddings
+# ---------------------------------------------------------------------------
+VISUAL_CANDIDATES = 15        # OCR frames passed to the reranker
+CLIP_MIN_SIMILARITY = 0.25    # CLIP cosine below this is never a match
+CLIP_MIN_Z = 2.5              # ...and the frame must stand out from the rest of the video
+CLIP_STRONG_Z = 4.5           # CLIP is overconfident on frames with look-alike words, so "strong" is rare
+FRAME_LEAD_IN = 0.5
+
+_frame_cache: dict[str, dict] = {}
+
+
+def _delete_frames(conn: sqlite3.Connection, video_id: str) -> None:
+    conn.execute("DELETE FROM frames_fts WHERE video_id = ?", (video_id,))
+    conn.execute("DELETE FROM frames WHERE video_id = ?", (video_id,))
+    conn.execute("DELETE FROM visual_index WHERE video_id = ?", (video_id,))
+
+
+def has_visual(video_id: str) -> bool:
+    with _connect() as conn:
+        return conn.execute("SELECT 1 FROM visual_index WHERE video_id = ?",
+                            (video_id,)).fetchone() is not None
+
+
+def index_frames(video_id: str, frames: list[dict]) -> int:
+    """Store key frames ``[{start, end, text, embedding}]``. All-or-nothing.
+
+    A frame's ``idx`` is its position, which is also its thumbnail's name.
+    """
+    texts = [f["text"] for f in frames]
+    with_text = [i for i, t in enumerate(texts) if t]
+    text_vecs = dict(zip(with_text, _embed([texts[i] for i in with_text]))) if with_text else {}
+
+    with _connect() as conn:
+        _delete_frames(conn, video_id)
+        for i, f in enumerate(frames):
+            tv = text_vecs.get(i)
+            cur = conn.execute(
+                "INSERT INTO frames (video_id, idx, start, end, text, text_embedding, clip_embedding)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (video_id, i, f["start"], f["end"], f["text"],
+                 tv.tobytes() if tv is not None else None,
+                 np.asarray(f["embedding"], dtype=np.float32).tobytes()),
+            )
+            if f["text"]:
+                conn.execute("INSERT INTO frames_fts (rowid, text, video_id) VALUES (?, ?, ?)",
+                             (cur.lastrowid, f["text"], video_id))
+        conn.execute("INSERT INTO visual_index (video_id, frames, indexed_at) VALUES (?, ?, ?)",
+                     (video_id, len(frames), time.time()))
+    with _emb_cache_lock:
+        _frame_cache.pop(video_id, None)
+    return len(frames)
+
+
+def _video_frames(conn: sqlite3.Connection, video_id: str) -> dict:
+    with _emb_cache_lock:
+        if video_id not in _frame_cache:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT id, idx, start, end, text, text_embedding, clip_embedding"
+                " FROM frames WHERE video_id = ? ORDER BY idx", (video_id,))]
+            clip = (np.vstack([np.frombuffer(r["clip_embedding"], dtype=np.float32) for r in rows])
+                    if rows else np.zeros((0, 0), dtype=np.float32))
+            text_rows = [r for r in rows if r["text_embedding"] is not None]
+            text_mat = (np.vstack([np.frombuffer(r["text_embedding"], dtype=np.float32) for r in text_rows])
+                        if text_rows else np.zeros((0, 0), dtype=np.float32))
+            for r in rows:
+                del r["clip_embedding"], r["text_embedding"]
+            _frame_cache[video_id] = {
+                "rows": rows, "by_id": {r["id"]: r for r in rows}, "clip": clip,
+                "text_ids": [r["id"] for r in text_rows], "text": text_mat,
+            }
+        return _frame_cache[video_id]
+
+
+def _clip_text(query: str) -> np.ndarray:
+    from backend import visual
+    return visual.embed_text(query)
+
+
+def search_visual(video_id: str, query: str, top_k: int = 4) -> list[dict]:
+    """Moments where the query is *shown*: on-screen text, or a matching picture.
+
+    Returns:
+        Up to *top_k* results, best first::
+
+            {jump_time, start, end, frame, source, text, score, strong}
+
+        ``source`` is ``"text"`` (the words appear on screen, e.g. a slide)
+        or ``"image"`` (the picture matches the description). ``frame`` is
+        the key-frame number, used to show a thumbnail.
+    """
+    query = query.strip()
+    if not query:
+        return []
+    with _connect() as conn:
+        data = _video_frames(conn, video_id)
+        if not data["rows"]:
+            return []
+        q = fts_query(query)
+        keyword = [r[0] for r in conn.execute(
+            "SELECT rowid FROM frames_fts WHERE frames_fts MATCH ? AND video_id = ?"
+            " ORDER BY bm25(frames_fts) LIMIT ?", (q, video_id, VISUAL_CANDIDATES))] if q else []
+
+    # On-screen text: keyword + meaning candidates, reranked like speech.
+    meaning: list[int] = []
+    if data["text_ids"]:
+        sims = data["text"] @ _embed([query])[0]
+        meaning = [data["text_ids"][i] for i in np.argsort(-sims)[:VISUAL_CANDIDATES]]
+    cands = [data["by_id"][i] for i in rrf_fuse(keyword, meaning)[:VISUAL_CANDIDATES]
+             if i in data["by_id"]]
+    text_hits = [(f, "text", s, s >= STRONG_SCORE)
+                 for f, s in zip(cands, _rerank(query, [f["text"] for f in cands]))
+                 if s >= RELEVANT_SCORE]
+    text_hits.sort(key=lambda h: h[2], reverse=True)
+
+    # Pictures: CLIP similarity, kept only if the frame clearly stands out.
+    image_hits = []
+    if len(data["rows"]) >= 3:
+        sims = data["clip"] @ _clip_text(query)
+        mean, std = float(sims.mean()), float(sims.std()) or 1e-6
+        for i in np.argsort(-sims)[:top_k * 3]:
+            z = (float(sims[i]) - mean) / std
+            if sims[i] >= CLIP_MIN_SIMILARITY and z >= CLIP_MIN_Z:
+                image_hits.append((data["rows"][i], "image", z, z >= CLIP_STRONG_Z))
+
+    # When something matches clearly, weak picture guesses are just noise.
+    if any(h[3] for h in text_hits + image_hits):
+        image_hits = [h for h in image_hits if h[3]]
+
+    results: list[dict] = []
+    for f, source, score, strong in text_hits + image_hits:
+        jump = round(max(0.0, f["start"] - FRAME_LEAD_IN), 2)
+        if any(abs(jump - r["jump_time"]) < DEDUPE_SECONDS for r in results):
+            continue
+        results.append({
+            "jump_time": jump, "start": f["start"], "end": f["end"], "frame": f["idx"],
+            "source": source, "text": f["text"], "score": round(float(score), 3),
+            "strong": bool(strong),
         })
         if len(results) == top_k:
             break

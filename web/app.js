@@ -73,6 +73,14 @@ window.addEventListener("hashchange", route);
 const uploads = new Map();      // local id -> {name, progress} while uploading
 let libraryPoll;                // single polling timer for the library
 
+// The "also search slides & visuals" choice is remembered per browser.
+function visualPref() {
+  try { return localStorage.getItem("videorag.visual") === "1"; } catch { return false; }
+}
+function setVisualPref(on) {
+  try { localStorage.setItem("videorag.visual", on ? "1" : "0"); } catch { /* storage unavailable */ }
+}
+
 function renderHome(token) {
   const input = h("input", { type: "file", accept: "video/*,.mkv,.avi,.mov", multiple: true, hidden: true });
   const drop = h("div", { class: "dropzone", tabindex: "0", role: "button",
@@ -92,6 +100,15 @@ function renderHome(token) {
   });
   input.addEventListener("change", () => { startUploads([...input.files], token); input.value = ""; });
 
+  const toggle = h("input", { type: "checkbox", id: "opt-visual", checked: visualPref() });
+  toggle.addEventListener("change", () => setVisualPref(toggle.checked));
+  const option = h("label", { class: "option", for: "opt-visual" }, toggle,
+    h("span", {},
+      h("strong", {}, "Also search slides & visuals"),
+      h("span", { class: "option-help" },
+        "Reads text on slides and the board, and matches pictures. Takes longer to process; "
+        + "turn it on for slide-heavy lectures. You can also enable it later per lecture.")));
+
   const list = h("div", { class: "library", "aria-live": "polite" });
   const count = h("span");
   app.append(
@@ -101,6 +118,7 @@ function renderHome(token) {
                + "VideoRAG finds the moment and plays it."),
     ),
     drop,
+    option,
     h("div", { class: "section-head" }, h("h2", {}, "Your lectures"), count),
     list,
   );
@@ -125,7 +143,8 @@ async function refreshLibrary(list, count, token) {
   const ready = videos.filter((v) => v.status === "ready").length;
   count.textContent = videos.length ? `${ready} ready to search` : "";
 
-  const busy = uploads.size || videos.some((v) => v.status === "queued" || v.status === "processing");
+  const busy = uploads.size || videos.some((v) => v.status === "queued" || v.status === "processing"
+                                                  || v.visual === "processing");
   clearTimeout(libraryPoll);   // fast while something is processing, slow otherwise (other tabs may upload)
   libraryPoll = setTimeout(() => refreshLibrary(list, count, token), busy ? 1500 : 5000);
 }
@@ -153,6 +172,8 @@ function videoCard(v, onChange) {
       h("div", { class: "card-title" }, v.name), del,
       h("div", { class: "card-meta" },
         h("span", { class: "pill ready" }, v.has_speech ? "Ready" : "No speech found"),
+        v.visual === "on" && h("span", { class: "pill" }, "Slides & visuals"),
+        v.visual === "processing" && h("span", { class: "pill working" }, "Adding visuals…"),
         fmt(v.duration)),
     );
   }
@@ -184,7 +205,7 @@ function uploadFile(file, token) {
   rerenderHomeIfVisible();
 
   const xhr = new XMLHttpRequest();
-  xhr.open("POST", `/api/videos?filename=${encodeURIComponent(file.name)}`);
+  xhr.open("POST", `/api/videos?filename=${encodeURIComponent(file.name)}&visual=${visualPref()}`);
   xhr.setRequestHeader("Content-Type", "application/octet-stream");
   xhr.upload.onprogress = (e) => {
     if (e.lengthComputable) uploads.get(key).progress = e.loaded / e.total;
@@ -235,14 +256,16 @@ async function renderLecture(id, params, token) {
     return;
   }
 
+  const searchable = video.has_speech || video.visual === "on";
   const player = h("video", { class: "player", controls: true, preload: "metadata",
                               src: `/api/videos/${id}/file` });
   const input = h("input", { class: "search-input", type: "search", name: "q", autocomplete: "off",
     placeholder: "Search this lecture…", "aria-label": "Search this lecture",
-    disabled: !video.has_speech });
-  const button = h("button", { class: "search-btn", type: "submit", disabled: !video.has_speech }, "Search");
+    disabled: !searchable });
+  const button = h("button", { class: "search-btn", type: "submit", disabled: !searchable }, "Search");
   const form = h("form", { class: "search-form", role: "search" }, input, button);
   const results = h("div", { "aria-live": "polite" });
+  const visualBar = h("div", { class: "visual-bar", "aria-live": "polite" });
 
   app.append(back, h("div", { class: "lecture" },
     h("div", { class: "player-col" },
@@ -254,9 +277,56 @@ async function renderLecture(id, params, token) {
       video.has_speech
         ? h("p", { class: "hint" }, "Search a topic to find where it is explained, or ask a question to jump to the answer. Press ",
             h("kbd", {}, "/"), " to search.")
-        : h("p", { class: "banner" }, "No speech was detected in this video, so there is nothing to search."),
+        : h("p", { class: "banner" }, video.visual === "on"
+            ? "No speech was detected, so only what is shown on screen is searched."
+            : "No speech was detected in this video. Turn on slide & visual search below to search what is shown."),
+      visualBar,
       results),
   ));
+
+  // ---- opt-in visual search for this lecture
+  const renderVisualBar = (v) => {
+    if (v.visual === "on") {
+      visualBar.replaceChildren(h("p", { class: "visual-on" }, "✓ Also searching slides & visuals"));
+    } else if (v.visual === "processing") {
+      const pct = v.visual_stage === "Reading slides and on-screen text" || v.visual_stage === "Understanding images"
+        ? ` · ${Math.round((v.visual_progress || 0) * 100)}%` : "";
+      visualBar.replaceChildren(h("div", { class: "visual-box" },
+        h("p", {}, h("span", { class: "spinner" }), `  Adding slide & visual search: ${v.visual_stage || "starting"}${pct}`),
+        h("div", { class: "progress" + (pct ? "" : " indeterminate") },
+          h("div", { style: `width:${(v.visual_progress || 0) * 100}%` })),
+        h("p", { class: "muted" }, "Speech search already works while this runs.")));
+    } else {
+      const enable = h("button", { class: "btn-secondary", type: "button" },
+        v.visual === "error" ? "Try again" : "Also search slides & visuals");
+      enable.addEventListener("click", async () => {
+        enable.disabled = true;
+        try { renderVisualBar(await api(`/api/videos/${id}/visual`, { method: "POST" })); pollVisual(); }
+        catch (err) { toast(err.message, true); enable.disabled = false; }
+      });
+      visualBar.replaceChildren(h("div", { class: "visual-box" },
+        v.visual === "error"
+          ? h("p", { class: "card-error" }, `Slide & visual search failed: ${v.visual_error}`)
+          : h("p", { class: "muted" }, "Only speech is searched. Add on-screen text and pictures for slide-heavy lectures (takes a few minutes)."),
+        enable));
+    }
+  };
+  const pollVisual = () => setTimeout(async () => {
+    if (token !== viewToken) return;
+    try {
+      const v = await api(`/api/videos/${id}`);
+      if (token !== viewToken) return;
+      if (v.visual === "on" && !searchable) { route(); return; }     // search box becomes usable
+      renderVisualBar(v);
+      if (v.visual === "processing") pollVisual();
+      else if (v.visual === "on") {
+        toast("Slide & visual search is ready.");
+        if (input.value.trim()) run(input.value);
+      }
+    } catch { pollVisual(); }
+  }, 2000);
+  renderVisualBar(video);
+  if (video.visual === "processing") pollVisual();
 
   const seek = (t, el) => {
     player.currentTime = t;
@@ -276,7 +346,7 @@ async function renderLecture(id, params, token) {
     try {
       const data = await api(`/api/videos/${id}/search?q=${encodeURIComponent(q)}`);
       if (token !== viewToken) return;
-      renderResults(results, data, seek);
+      renderResults(results, data, seek, id);
     } catch (err) {
       if (token !== viewToken) return;
       results.replaceChildren(h("p", { class: "banner" }, `Search failed: ${err.message}`));
@@ -286,7 +356,7 @@ async function renderLecture(id, params, token) {
   };
 
   form.addEventListener("submit", (e) => { e.preventDefault(); run(input.value); });
-  if (video.has_speech) {
+  if (searchable) {
     results.append(h("div", { class: "chips" }, ...EXAMPLES.map((ex) => h("span", { class: "chip muted" }, ex))));
   }
 
@@ -295,21 +365,24 @@ async function renderLecture(id, params, token) {
     player.addEventListener("loadedmetadata", () => { player.currentTime = startAt; }, { once: true });
   }
   if (params.get("q")) run(params.get("q"));
-  else if (video.has_speech) input.focus();
+  else if (searchable) input.focus();
 }
 
-function renderResults(container, data, seek) {
+function renderResults(container, data, seek, id) {
   const items = data.results;
-  if (!items.length) {
+  const shown = data.visual || [];
+  if (!items.length && !shown.length) {
     container.replaceChildren(h("p", { class: "banner" },
       `Nothing in this lecture matches “${data.query}”. Try different words.`));
     return;
   }
   const nodes = [];
-  if (!items.some((r) => r.strong)) {
+  if (items.length && !items.some((r) => r.strong) && !shown.some((r) => r.strong)) {
     nodes.push(h("p", { class: "banner" }, "No strong match. These are the closest moments; check them or rephrase."));
   }
-  nodes.push(h("p", { class: "results-head" }, data.topic ? "Where this is covered" : "Best answers"));
+  if (items.length) {
+    nodes.push(h("p", { class: "results-head" }, data.topic ? "Where this is covered" : "Best answers"));
+  }
   const list = h("ul", { class: "results" });
   items.forEach((r) => {
     const label = !data.topic
@@ -327,7 +400,26 @@ function renderResults(container, data, seek) {
     btn.addEventListener("click", () => seek(r.jump_time, btn));
     list.append(h("li", {}, btn));
   });
-  nodes.push(list);
+  if (items.length) nodes.push(list);
+
+  if (shown.length) {
+    nodes.push(h("p", { class: "results-head" }, "Shown on screen"));
+    const vlist = h("ul", { class: "results" });
+    shown.forEach((r) => {
+      const label = r.source === "text" ? "Written on screen" : "In the picture";
+      const btn = h("button", { class: "result result-visual", type: "button",
+                                "aria-label": `Play from ${fmt(r.jump_time)}: ${label}` },
+        h("img", { class: "frame-thumb", src: `/api/videos/${id}/frames/${r.frame}.jpg`, alt: "", loading: "lazy" }),
+        h("span", { class: "result-body" },
+          h("span", { class: "result-time" }, `▶ ${fmt(r.jump_time)}`),
+          h("span", { class: "result-label" }, label, !r.strong && h("span", { class: "weak" }, "· weak match")),
+          r.text && h("p", { class: "result-text" }, h("mark", {}, r.text))),
+      );
+      btn.addEventListener("click", () => seek(r.jump_time, btn));
+      vlist.append(h("li", {}, btn));
+    });
+    nodes.push(vlist);
+  }
   container.replaceChildren(...nodes);
 }
 

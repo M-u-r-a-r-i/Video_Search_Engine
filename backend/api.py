@@ -7,7 +7,9 @@ The VideoRAG web server: a small JSON API plus the static website.
     POST   /api/videos?filename=...   upload a video (raw request body)
     GET    /api/videos/{id}           one video and its processing status
     GET    /api/videos/{id}/file      the video itself (supports seeking)
-    GET    /api/videos/{id}/search?q= search what is said in the video
+    GET    /api/videos/{id}/search?q= search what is said (and shown) in the video
+    POST   /api/videos/{id}/visual    add visual search to an indexed video
+    GET    /api/videos/{id}/frames/{n}.jpg   key-frame thumbnail
     DELETE /api/videos/{id}           remove a video and its index
 """
 
@@ -15,6 +17,7 @@ import hashlib
 import mimetypes
 import os
 import re
+import shutil
 import uuid
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -23,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend import store
 from backend.jobs import JobManager
-from backend.paths import ROOT, VIDEO_DIR
+from backend.paths import FRAMES_DIR, ROOT, VIDEO_DIR
 
 WEB_DIR = os.path.join(ROOT, "web")
 ALLOWED_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
@@ -43,13 +46,21 @@ def create_app(jobs: JobManager | None = None) -> FastAPI:
     def _status(video_id: str) -> dict | None:
         """Merge what the index knows with what the job queue knows."""
         video = store.get_video(video_id)
+        job = app.state.jobs.get(video_id)
         if video:
-            return {
+            status = {
                 "id": video_id, "name": video["name"], "duration": video["duration"],
                 "status": "ready", "has_speech": video["chunks"] > 0,
-                "indexed_at": video["indexed_at"],
+                "indexed_at": video["indexed_at"], "visual": "on" if video["visual"] else "off",
             }
-        job = app.state.jobs.get(video_id)
+            # A job may still be adding visual search to this (already searchable) video.
+            if job and job.get("visual") and not video["visual"]:
+                if job["status"] in ("queued", "processing"):
+                    status.update(visual="processing", visual_stage=job["stage"],
+                                  visual_progress=job["progress"])
+                elif job["status"] == "error":
+                    status.update(visual="error", visual_error=job["error"])
+            return status
         if job:
             return {
                 "id": video_id, "name": job["name"], "status": job["status"],
@@ -77,11 +88,13 @@ def create_app(jobs: JobManager | None = None) -> FastAPI:
         return status
 
     @app.post("/api/videos", status_code=201)
-    async def upload(request: Request, filename: str = Query(..., min_length=1)) -> dict:
+    async def upload(request: Request, filename: str = Query(..., min_length=1),
+                     visual: bool = Query(False, description="also index what is shown (slower)")) -> dict:
         """Upload a video as the raw request body; processing starts automatically.
 
         The file is named by its content hash, so uploading the same lecture
-        again (even renamed) reuses the existing index instantly.
+        again (even renamed) reuses the existing index instantly. ``visual``
+        opts in to on-screen text and picture search for this lecture.
         """
         name = os.path.basename(filename)
         ext = os.path.splitext(name)[1].lower()
@@ -114,8 +127,31 @@ def create_app(jobs: JobManager | None = None) -> FastAPI:
             os.replace(tmp_path, path)
 
         if not store.is_indexed(video_id):
-            app.state.jobs.submit(video_id, path, name)
+            app.state.jobs.submit(video_id, path, name, visual=visual)
+        elif visual and not store.has_visual(video_id):
+            app.state.jobs.submit(video_id, path, name, audio=False, visual=True)
         return _status(video_id)
+
+    @app.post("/api/videos/{video_id}/visual", status_code=202)
+    def enable_visual(video_id: str) -> dict:
+        """Add visual search to a lecture that was processed without it."""
+        _check_id(video_id)
+        video = store.get_video(video_id)
+        if video is None:
+            raise HTTPException(409, "This video is not ready yet.")
+        if not os.path.exists(video["path"]):
+            raise HTTPException(404, "Video file not found")
+        if not video["visual"]:
+            app.state.jobs.submit(video_id, video["path"], video["name"], audio=False, visual=True)
+        return _status(video_id)
+
+    @app.get("/api/videos/{video_id}/frames/{frame}.jpg")
+    def frame_image(video_id: str, frame: int) -> FileResponse:
+        _check_id(video_id)
+        path = os.path.join(FRAMES_DIR, video_id, f"{frame:05d}.jpg")
+        if frame < 0 or not os.path.exists(path):
+            raise HTTPException(404, "Frame not found")
+        return FileResponse(path, media_type="image/jpeg")
 
     @app.delete("/api/videos/{video_id}", status_code=204)
     def delete(video_id: str) -> None:
@@ -130,6 +166,7 @@ def create_app(jobs: JobManager | None = None) -> FastAPI:
         store.delete_video(video_id)
         app.state.jobs.forget(video_id)
         _remove(path)
+        shutil.rmtree(os.path.join(FRAMES_DIR, video_id), ignore_errors=True)
 
     # ------------------------------------------------------------------ playback
     @app.get("/api/videos/{video_id}/file")
@@ -150,8 +187,11 @@ def create_app(jobs: JobManager | None = None) -> FastAPI:
         _check_id(video_id)
         if not store.is_indexed(video_id):
             raise HTTPException(409, "This video is not ready to search yet.")
+        visual_on = store.has_visual(video_id)
         return {"query": q, "topic": store.is_topic_query(q),
-                "results": store.search(video_id, q, top_k=k)}
+                "results": store.search(video_id, q, top_k=k),
+                "visual_enabled": visual_on,
+                "visual": store.search_visual(video_id, q, top_k=4) if visual_on else []}
 
     # ------------------------------------------------------------------ website
     @app.get("/", include_in_schema=False)
