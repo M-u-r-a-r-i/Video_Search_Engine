@@ -211,6 +211,16 @@ def get_video(video_id: str) -> dict | None:
         return video
 
 
+def list_videos() -> list[dict]:
+    """All indexed videos, newest first, with their passage counts."""
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT v.id, v.name, v.path, v.duration, v.indexed_at,"
+            "       (SELECT COUNT(*) FROM chunks c WHERE c.video_id = v.id) AS chunks"
+            " FROM videos v ORDER BY v.indexed_at DESC"
+        )]
+
+
 def delete_video(video_id: str) -> None:
     with _connect() as conn:
         _delete_rows(conn, video_id)

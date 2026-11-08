@@ -17,7 +17,8 @@ machine.
 - **Reranked for relevance.** A cross-encoder (`ms-marco-MiniLM-L-12-v2`) picks the best passage and the best sentence inside it.
 - **Explanations, not just mentions.** Search for a topic like *"gradient descent"* and you land where the lecturer starts explaining it, shown as one section (e.g. *Explained here · 12:04 – 15:30*), with passing mentions labelled separately below.
 - **Honest confidence.** Results are labelled *strong* or *weak* instead of being silently hidden, so a correct answer never disappears.
-- **Built for long lectures.** Uploads up to 4 GB, with live transcription progress.
+- **A real website, running on your PC.** Drag in lectures, watch them process live, and search beside the player. Clicking a result seeks instantly, and every search can be shared as a link to the exact moment.
+- **Built for long lectures.** No upload size limit; lectures queue up and process in the background.
 - **Runs locally.** No API keys, no cloud; your videos never leave your machine.
 - **Measured accuracy.** A benchmark script ships with the repo (see [Accuracy](#-accuracy)).
 
@@ -62,24 +63,26 @@ source .venv/bin/activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Run the app
-streamlit run app.py
+# 4. Start VideoRAG
+python run.py
 ```
 
-The app opens at **http://localhost:8501**.
+Your browser opens **http://127.0.0.1:8000**. Press `Ctrl+C` in the terminal to stop.
+Use `python run.py --port 9000` for another port, or `--no-browser` to skip opening a tab.
 
 > ⏳ **First run** downloads the models (Whisper, MPNet, cross-encoder).
 > This can take a few minutes depending on your connection; later runs use the cache.
 
 ### How to use
 
-1. **Drop a lecture video** (`.mp4`, `.mkv`, `.webm`, `.mov`, `.avi`) onto the uploader.
-2. Click **⚡ Process Video**. VideoRAG extracts the audio, transcribes it, and indexes every sentence.
-   On a typical laptop CPU this runs at roughly **5× real time** (a 1-hour lecture takes about 12 minutes); a CUDA GPU is used automatically if available.
-3. **Search** in natural language (e.g. *"when do they define eigenvalues?"*).
-4. Click **▶ timestamp** to jump the player to that moment. The matching sentence is highlighted in each result.
+1. **Drop lecture videos** (`.mp4`, `.mkv`, `.webm`, `.mov`, `.avi`) onto the page. Processing starts automatically:
+   VideoRAG extracts the audio, transcribes it, and indexes every sentence. On a typical laptop CPU this runs at roughly
+   **5× real time** (a 1-hour lecture takes about 12 minutes); a CUDA GPU is used automatically if available.
+2. **Open a lecture** and search in natural language: a topic (*"eigenvalues"*) to find where it is explained,
+   or a question (*"why does gradient descent converge?"*) to jump to the answer. Press `/` to focus the search box.
+3. **Click a result** to play from that moment. The matching sentence is highlighted.
 
-Lectures you have processed before open instantly. Videos are identified by content, so renaming a file doesn't trigger reprocessing.
+Everything you process stays in your library. Uploading the same lecture again (even renamed) reuses its index instantly.
 
 ---
 
@@ -117,9 +120,14 @@ Lecture ─► extract audio (ffmpeg) ─► Whisper (word timestamps) ─► se
                                                                      │
                                     SQLite: FTS5 keyword index + MPNet embeddings
 
-Question ─► keyword (BM25) + meaning (MPNet) ─► fuse top 25 ─► cross-encoder rerank
-         ─► pick best sentence in each passage ─► ▶ jump to that second (strong / weak)
+Query ─► keyword (BM25) + meaning (MPNet) ─► fuse top 25 ─► cross-encoder rerank
+      ─► group neighbouring passages into sections (explained vs. mention)
+      ─► topic: jump to where the section starts · question: jump to the answering sentence
 ```
+
+The website is a small FastAPI server (`backend/api.py`) with a JSON API and a plain HTML/CSS/JS
+frontend (`web/`, no build step). Videos are processed one at a time on a background worker
+(`backend/jobs.py`) while the page polls their progress. API docs: http://127.0.0.1:8000/api/docs
 
 ---
 
@@ -127,14 +135,16 @@ Question ─► keyword (BM25) + meaning (MPNet) ─► fuse top 25 ─► cross
 
 ```
 Video_Search_Engine/
-├── app.py                    # Streamlit frontend (upload, progress, search, results)
+├── run.py                    # start the website: python run.py
+├── web/                      # frontend: index.html, app.js, styles.css (no build step)
 ├── backend/
+│   ├── api.py                # FastAPI server: upload, library, video streaming, search
+│   ├── jobs.py               # background processing queue with progress
 │   ├── processor.py          # ffmpeg audio extraction + Whisper → timestamped sentences
-│   ├── store.py              # SQLite index, hybrid search, reranking, sentence pinpointing
+│   ├── store.py              # SQLite index, hybrid search, reranking, sections, pinpointing
 │   └── paths.py              # where runtime data lives
 ├── benchmarks/               # accuracy benchmark + question set
-├── tests/                    # unit tests (pytest)
-├── .streamlit/config.toml    # raises the upload limit for long lectures
+├── tests/                    # unit + API tests (pytest)
 └── requirements.txt
 ```
 
@@ -150,14 +160,14 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests replace the ML models with simple stand-ins, so they run in seconds while still
-exercising the real SQLite index and search pipeline.
+The tests replace the ML models and Whisper with simple stand-ins, so they run in seconds while
+still exercising the real SQLite index, search pipeline and HTTP API.
 
 ---
 
 ## 🛠️ Tech Stack
 
-Python · Streamlit · FFmpeg · faster-whisper · sentence-transformers · SQLite (FTS5) · NumPy
+Python · FastAPI · FFmpeg · faster-whisper · sentence-transformers · SQLite (FTS5) · NumPy · vanilla JS
 
 ---
 

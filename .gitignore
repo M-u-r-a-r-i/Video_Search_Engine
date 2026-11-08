@@ -38,3 +38,6 @@ PROJECT_DEEP_DIVE.md
 
 # ---- Benchmark cache ----
 benchmarks/.cache/
+
+# ---- Local tool config ----
+.claude/
