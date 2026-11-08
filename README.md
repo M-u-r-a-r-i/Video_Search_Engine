@@ -15,6 +15,7 @@ machine.
 - **Understands questions, not just keywords.** Meaning-based search (`all-mpnet-base-v2`) finds answers even when you phrase things differently from the lecturer.
 - **Never misses exact terms.** Keyword search (SQLite FTS5 / BM25) runs alongside, so names, formulas and jargon are always matched.
 - **Reranked for relevance.** A cross-encoder (`ms-marco-MiniLM-L-12-v2`) picks the best passage and the best sentence inside it.
+- **Explanations, not just mentions.** Search for a topic like *"gradient descent"* and you land where the lecturer starts explaining it, shown as one section (e.g. *Explained here · 12:04 – 15:30*), with passing mentions labelled separately below.
 - **Honest confidence.** Results are labelled *strong* or *weak* instead of being silently hidden, so a correct answer never disappears.
 - **Built for long lectures.** Uploads up to 4 GB, with live transcription progress.
 - **Runs locally.** No API keys, no cloud; your videos never leave your machine.
@@ -85,12 +86,13 @@ Lectures you have processed before open instantly. Videos are identified by cont
 ## 📊 Accuracy
 
 Measured with [`benchmarks/run_benchmark.py`](benchmarks/run_benchmark.py) on an 18.5-minute
-educational video, using 28 student-style questions plus 3 off-topic ones:
+educational video, using 28 student-style questions, 11 topic searches and 3 off-topic questions:
 
 | | Result |
 |---|---|
-| Top result jumps to the answer sentence (±5 s) | **26 / 28** |
-| Top result's passage contains the answer | **28 / 28** |
+| Questions: top result jumps to the answer sentence (±5 s) | **26 / 28** |
+| Topics: top result jumps to where the explanation starts (±5 s) | **11 / 11** |
+| Questions: top result's section contains the answer | **28 / 28** |
 | Off-topic questions with no strong match | **3 / 3** |
 | Search time (CPU) | ~1 s |
 | Indexing speed (CPU, Whisper `base`) | ~5.6× real time |
