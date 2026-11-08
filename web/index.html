@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VideoRAG · Lecture Search</title>
+  <meta name="description" content="Search what is said in your lectures and jump to the exact second.">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%237c5cff'/><path d='M12 9l12 7-12 7z' fill='white'/></svg>">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="#/" class="brand" aria-label="VideoRAG home">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>VideoRAG</span>
+    </a>
+    <span class="topbar-tag">Find the exact moment in any lecture</span>
+  </header>
+
+  <main id="app" tabindex="-1"></main>
+
+  <footer class="footer">
+    Runs entirely on this computer. Your videos never leave it.
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
